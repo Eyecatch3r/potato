@@ -41,9 +41,11 @@ let userState = null;
 let isLoading = false;
 let textSaveTimer = null;
 let currentSpanAnnotations = [];
-let hasAttemptedForwardValidation = false;
 let debugLastInstanceId = null;
 let debugOverlayCount = 0;
+
+// Validation state — errors only shown after first forward navigation attempt
+let hasAttemptedForwardValidation = false;
 
 // Stored event handler references for proper cleanup (prevents memory leaks)
 const boundEventHandlers = {
@@ -460,10 +462,17 @@ function getCurrentOverlayCount() {
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', function () {
+    // Skip annotation initialization on non-annotation pages (consent, instructions, etc.)
+    // but still show the page content and enable navigation
+    if (window.config && !window.config.is_annotation_page) {
+        setLoading(false);
+        validateRequiredFields();
+        return;
+    }
     loadCurrentInstance();
     setupEventListeners();
     // Initial validation check
-    validateRequiredFields({ showErrors: false });
+    validateRequiredFields();
     // Initialize span manager integration
     initializeSpanManagerIntegration();
     // Initialize display logic for conditional schemas
@@ -881,6 +890,9 @@ async function loadSpanAnnotations() {
 }
 
 async function loadCurrentInstance() {
+    // Reset validation state when loading a new instance
+    hasAttemptedForwardValidation = false;
+
     try {
         setLoading(true);
         showError(false);
@@ -1265,11 +1277,11 @@ function generateAnnotationForms() {
     // The server generates the forms, so we just need to set up event listeners
     // The forms are already in the HTML from server-side generation
     setupInputEventListeners();
-    validateRequiredFields({ showErrors: false });
+    validateRequiredFields();
 }
 
 async function saveAnnotations() {
-    if (!currentInstance) {
+    if (!currentInstance || !currentInstance.id) {
         return;
     }
 
@@ -1352,6 +1364,9 @@ async function saveAnnotations() {
 async function navigateToPrevious() {
     debugLog('[DEEP DEBUG NAV] navigateToPrevious - ENTRY POINT');
     deepDebugState.navigationCalls++;
+
+    // Reset validation state on backward navigation
+    hasAttemptedForwardValidation = false;
 
     logDeepDebug('navigateToPrevious_start', {
         currentInstanceId: currentInstance?.id,
@@ -1444,11 +1459,9 @@ async function navigateToPrevious() {
                 overlayCount: getCurrentOverlayCount()
             });
 
-            const nextUrl = response.redirected && response.url ? response.url : window.location.href;
-
-            // Add a small delay to ensure span manager operations complete before navigation
+            // Add a small delay to ensure span manager operations complete before reload
             setTimeout(() => {
-                window.location.assign(nextUrl);
+                window.location.reload();
             }, 100);
         } else {
             console.error('[DEEP DEBUG NAV] navigateToPrevious - Navigation failed:', response.status);
@@ -1458,6 +1471,30 @@ async function navigateToPrevious() {
         console.error('[DEEP DEBUG NAV] navigateToPrevious - Navigation error:', error);
         setLoading(false);
     }
+}
+
+/**
+ * Handle non-OK navigation responses from the server.
+ * Shows a toast notification for validation errors (400).
+ */
+async function handleNavigationResponseError(response) {
+    console.error('[NAV] Navigation failed:', response.status);
+    if (response.status === 400) {
+        try {
+            const data = await response.json();
+            if (data.status === 'validation_error') {
+                const schemas = (data.unsatisfied_schemas || []).join(', ');
+                showNotification(data.message || `Required annotations not completed: ${schemas}`, 'error');
+                // Re-run validation to highlight unfilled fields
+                hasAttemptedForwardValidation = true;
+                validateRequiredFields({ showErrors: true });
+                return;
+            }
+        } catch (e) {
+            // Not JSON, fall through
+        }
+    }
+    showNotification('Navigation failed. Please try again.', 'error');
 }
 
 async function navigateToNext() {
@@ -1474,11 +1511,10 @@ async function navigateToNext() {
         return;
     }
 
+    // Client-side required field validation
     hasAttemptedForwardValidation = true;
-
     if (!validateRequiredFields({ showErrors: true })) {
-        debugLog('[DEEP DEBUG NAV] navigateToNext - Validation failed, staying on current page');
-        showNotification('Please complete the required annotations before continuing.', 'warning');
+        debugLog('[NAV] navigateToNext - blocked by client-side validation');
         return;
     }
 
@@ -1563,17 +1599,12 @@ async function navigateToNext() {
                 overlayCount: getCurrentOverlayCount()
             });
 
-            const nextUrl = response.redirected && response.url ? response.url : window.location.href;
-
-            // Add a small delay to ensure span manager operations complete before navigation
+            // Add a small delay to ensure span manager operations complete before reload
             setTimeout(() => {
-                window.location.assign(nextUrl);
+                window.location.reload();
             }, 100);
         } else {
-            const handled = await handleNavigationResponseError(response, '[NAV] navigateToNext');
-            if (!handled) {
-                console.error('[DEEP DEBUG NAV] navigateToNext - Navigation failed:', response.status);
-            }
+            handleNavigationResponseError(response);
             setLoading(false);
         }
     } catch (error) {
@@ -1585,6 +1616,16 @@ async function navigateToNext() {
 async function navigateToInstance(instanceIndex) {
     if (isLoading) {
         return;
+    }
+
+    // Client-side validation for forward navigation
+    const currentIdx = currentInstance ? currentInstance.index : 0;
+    if (instanceIndex > currentIdx) {
+        hasAttemptedForwardValidation = true;
+        if (!validateRequiredFields({ showErrors: true })) {
+            debugLog('[NAV] navigateToInstance - blocked by client-side validation');
+            return;
+        }
     }
 
     try {
@@ -1659,10 +1700,7 @@ async function navigateToInstance(instanceIndex) {
             // Reload the page to get the new instance data from the server
             window.location.reload();
         } else {
-            const handled = await handleNavigationResponseError(response, '[NAV] navigateToInstance');
-            if (!handled) {
-                throw new Error('Failed to navigate to instance');
-            }
+            await handleNavigationResponseError(response);
         }
     } catch (error) {
         console.error('Error navigating to instance:', error);
@@ -1672,14 +1710,16 @@ async function navigateToInstance(instanceIndex) {
     }
 }
 
-function validateRequiredFields(options = {}) {
-    const { showErrors = hasAttemptedForwardValidation } = options;
+function validateRequiredFields(options) {
+    // If user has already attempted forward validation, always show errors
+    // so they get real-time feedback as they fill in fields
+    const showErrors = (options && options.showErrors) || hasAttemptedForwardValidation;
 
-    // Check all controls with required validation metadata.
+    // Check all inputs with validation="required" or validation="required_label"
     const requiredInputs = document.querySelectorAll(
-        'input[validation="required"], select[validation="required"], textarea[validation="required"]'
+        'input[validation="required"], input[validation="required_label"], ' +
+        'select[validation="required"], textarea[validation="required"]'
     );
-    const requiredLabelInputs = document.querySelectorAll('input[validation="required_label"]');
     let allRequiredFilled = true;
     const unfilledSchemas = [];
 
@@ -1690,7 +1730,7 @@ function validateRequiredFields(options = {}) {
         const schemaName = form ? (form.getAttribute('data-schema-name') || form.id) : null;
         if (!schemaName) return;
         if (!formGroups[schemaName]) {
-            formGroups[schemaName] = { form: form, radios: {}, others: [], requiredLabels: [] };
+            formGroups[schemaName] = { form: form, radios: {}, others: [] };
         }
         if (input.type === 'radio') {
             const name = input.name;
@@ -1701,16 +1741,6 @@ function validateRequiredFields(options = {}) {
         } else {
             formGroups[schemaName].others.push(input);
         }
-    });
-
-    requiredLabelInputs.forEach(input => {
-        const form = input.closest('.annotation-form');
-        const schemaName = form ? (form.getAttribute('data-schema-name') || form.id) : null;
-        if (!schemaName) return;
-        if (!formGroups[schemaName]) {
-            formGroups[schemaName] = { form: form, radios: {}, others: [], requiredLabels: [] };
-        }
-        formGroups[schemaName].requiredLabels.push(input);
     });
 
     // Check each schema's required inputs
@@ -1725,48 +1755,41 @@ function validateRequiredFields(options = {}) {
             }
         }
 
-        // Check other inputs (textbox, select, etc.)
+        // Check other inputs (textbox, select, range, etc.)
         for (const input of group.others) {
-            if (!input.value || input.value.trim() === '') {
+            if (input.type === 'range') {
+                // Sliders: check if user has interacted (data-modified attribute)
+                if (input.getAttribute('data-modified') !== 'true') {
+                    schemaFilled = false;
+                    break;
+                }
+            } else if (!input.value || input.value.trim() === '') {
                 schemaFilled = false;
                 break;
             }
         }
 
-        if (schemaFilled && group.requiredLabels.length > 0) {
-            for (const input of group.requiredLabels) {
-                if (!input.checked) {
-                    schemaFilled = false;
-                    break;
-                }
-            }
-        }
-
         if (!schemaFilled) {
             allRequiredFilled = false;
-            // Get human-readable label from the form's legend/title
             const legend = group.form.querySelector('legend');
             const label = legend ? legend.textContent.trim() : schemaName;
             unfilledSchemas.push({ name: schemaName, label: label });
         }
 
-        // Toggle red highlight on unfilled required forms
-        if (group.form) {
-            group.form.classList.toggle('required-unfilled', showErrors && !schemaFilled);
+        // Only show visual feedback if user has attempted forward navigation
+        if (showErrors && group.form) {
+            group.form.classList.toggle('required-unfilled', !schemaFilled);
         }
     }
 
-    // Update Next button state
-    const nextBtn = document.getElementById('next-btn');
-    if (nextBtn) {
-        nextBtn.disabled = showErrors && !allRequiredFilled;
+    // Only show error messages after first forward attempt
+    if (showErrors) {
+        updateRequiredFieldsError(unfilledSchemas);
     }
-
-    // Show/hide error message
-    updateRequiredFieldsError(showErrors ? unfilledSchemas : []);
 
     return allRequiredFilled;
 }
+
 function updateRequiredFieldsError(unfilledSchemas) {
     let errorDiv = document.getElementById('required-fields-error');
 
@@ -1810,8 +1833,10 @@ function setLoading(loading) {
         loadingState.style.display = 'none';
         mainContent.style.display = 'block';
         prevBtn.disabled = false;
-        // Don't enable next button here - let validateRequiredFields handle it
-        validateRequiredFields({ showErrors: hasAttemptedForwardValidation });
+        // Re-enable next button, then run validation which may re-disable it
+        // if required fields are unfilled
+        nextBtn.disabled = false;
+        validateRequiredFields();
     }
 }
 
@@ -2042,7 +2067,7 @@ function handleInputChange(element) {
     }
 
     // Validate required fields after input change
-    validateRequiredFields({ showErrors: hasAttemptedForwardValidation });
+    validateRequiredFields();
 
     let value;
 
@@ -3776,20 +3801,6 @@ async function jumpToUnannotatedPrev() {
     }
 }
 
-async function handleNavigationResponseError(response, debugPrefix) {
-    const contentType = response.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
-        const result = await response.json();
-        if (result.status === 'validation_error') {
-            showNotification(result.message || 'Please complete the required annotations before continuing.', 'warning');
-            return true;
-        }
-    }
-
-    console.error(`${debugPrefix} - Navigation failed:`, response.status);
-    return false;
-}
-
 /**
  * Jump to the next unannotated instance.
  * Saves current annotations and navigates to the first unannotated item after the current position.
@@ -3800,6 +3811,13 @@ async function jumpToUnannotated() {
 
     if (isLoading) {
         debugLog('[NAV] jumpToUnannotated - Navigation blocked, still loading');
+        return;
+    }
+
+    // Client-side required field validation
+    hasAttemptedForwardValidation = true;
+    if (!validateRequiredFields({ showErrors: true })) {
+        debugLog('[NAV] jumpToUnannotated - blocked by client-side validation');
         return;
     }
 
@@ -3844,7 +3862,7 @@ async function jumpToUnannotated() {
             debugLog('[NAV] jumpToUnannotated - Navigation successful, reloading page');
             window.location.reload();
         } else {
-            await handleNavigationResponseError(response, '[NAV] jumpToUnannotated');
+            await handleNavigationResponseError(response);
             setLoading(false);
         }
     } catch (error) {

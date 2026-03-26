@@ -18,7 +18,7 @@ solo_mode:
   # Pull the model first: ollama pull qwen3:4b
   labeling_models:
     - endpoint_type: "ollama"
-      model: "qwen3:4b"
+      model: "llama3.2:3b"
       endpoint_url: "http://localhost:11434"
       max_tokens: 256
       temperature: 0.1
@@ -26,7 +26,7 @@ solo_mode:
   # Revision models for prompt optimization
   revision_models:
     - endpoint_type: "ollama"
-      model: "qwen3:4b"
+      model: "llama3.2:3b"
       endpoint_url: "http://localhost:11434"
 
   # Uncertainty estimation
@@ -57,7 +57,7 @@ solo_mode:
 
 # Data configuration
 data_files:
-  - "data/sentiment-examples.json"
+  - "data/reflection-examples.json"
 
 item_properties:
   id_key: "id"
