@@ -3,11 +3,12 @@ Handle all front-end related functionalities.
 """
 
 import base64
-import os
-import logging
-import json
-import re
 import hashlib
+import json
+import logging
+import mimetypes
+import os
+import re
 from collections import OrderedDict
 
 #add local module
@@ -35,107 +36,17 @@ STATS_KEYS = {
 # Default name for the generated annotation layout file
 DEFAULT_ANNOTATION_LAYOUT_SUBDIR = "layouts"
 DEFAULT_ANNOTATION_LAYOUT_FILENAME = "task_layout.html"
-
-
-SUPPORTED_HEADER_LOGO_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.webp'}
-EXTENSION_TO_MIME = {
-    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
-    '.webp': 'image/webp',
+SUPPORTED_HEADER_LOGO_EXTENSIONS = {
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".avif",
+    ".bmp",
+    ".ico",
 }
-
-
-def resolve_header_logo_src(config: dict) -> str:
-    """
-    Resolve the ``header_logo`` config value into a src URL for an ``<img>`` tag.
-
-    - If not configured, returns ``""``.
-    - If the value is an HTTP(S) URL, returns it directly.
-    - Otherwise, reads the local file, base64-encodes it, and returns a data URL.
-
-    Returns:
-        A URL string suitable for ``<img src="...">``, or ``""`` if not configured.
-    """
-    logo_path = config.get("header_logo")
-    if not logo_path:
-        return ""
-
-    # Pass through external URLs
-    if logo_path.startswith(("http://", "https://")):
-        return logo_path
-
-    try:
-        resolved = resolve_project_asset_path(config, logo_path)
-    except FileNotFoundError:
-        logger.warning("header_logo file not found: %s", logo_path)
-        return ""
-
-    ext = os.path.splitext(resolved)[1].lower()
-    if ext not in SUPPORTED_HEADER_LOGO_EXTENSIONS:
-        logger.warning("header_logo has unsupported extension '%s' (supported: %s)",
-                        ext, ', '.join(sorted(SUPPORTED_HEADER_LOGO_EXTENSIONS)))
-        return ""
-
-    mime = EXTENSION_TO_MIME[ext]
-    with open(resolved, "rb") as f:
-        encoded = base64.b64encode(f.read()).decode("ascii")
-
-    return f"data:{mime};base64,{encoded}"
-
-
-def resolve_project_asset_path(config: dict, relative_path: str) -> str:
-    """
-    Resolve a project-relative asset path using the config file directory as base.
-
-    Args:
-        config: The configuration dict (must contain ``__config_file__``)
-        relative_path: The path as specified in the config (absolute or relative)
-
-    Returns:
-        Absolute path to the resolved file
-
-    Raises:
-        FileNotFoundError: If the file does not exist at the resolved path
-    """
-    if os.path.isabs(relative_path) and os.path.exists(relative_path):
-        return relative_path
-
-    if os.path.exists(relative_path):
-        return os.path.abspath(relative_path)
-
-    # Resolve relative to the config file's directory
-    config_file = config.get("__config_file__", "")
-    if config_file:
-        real_path = os.path.realpath(config_file)
-        dir_path = os.path.dirname(real_path)
-        abs_path = os.path.join(dir_path, relative_path)
-        if os.path.exists(abs_path):
-            return abs_path
-
-    raise FileNotFoundError(f"Project asset file not found: {relative_path}")
-
-
-def load_project_base_css_html(config: dict) -> str:
-    """
-    Load the project-level ``base_css`` file and return it wrapped in a ``<style>`` tag.
-
-    If ``base_css`` is not configured, returns an empty string.
-
-    Args:
-        config: The configuration dict
-
-    Returns:
-        HTML ``<style>`` block, or empty string
-    """
-    css_path = config.get("base_css")
-    if not css_path:
-        return ""
-
-    resolved = resolve_project_asset_path(config, css_path)
-    with open(resolved, "rt", encoding="utf-8") as f:
-        css_content = f.read()
-
-    return f'<style id="potato-project-base-css">\n{css_content}\n</style>'
 
 
 def compute_config_md5(config):
@@ -312,6 +223,111 @@ def generate_statistics_sidebar(statistics):
     return layout
 
 
+def resolve_project_asset_path(asset_path: str, config: dict, asset_label: str) -> str:
+    """
+    Resolve a project-local asset path, allowing relative paths from the config file.
+    """
+    if os.path.exists(asset_path):
+        return asset_path
+
+    real_path = os.path.realpath(config["__config_file__"])
+    dir_path = os.path.dirname(real_path)
+    abs_asset_path = os.path.join(dir_path, asset_path)
+
+    if not os.path.exists(abs_asset_path):
+        raise FileNotFoundError(f"{asset_label} not found: {asset_path}")
+
+    return abs_asset_path
+
+
+def is_direct_asset_url(asset_path: str) -> bool:
+    """
+    Return True when the asset path is already a browser-consumable URL.
+    """
+    if not asset_path:
+        return False
+
+    return asset_path.startswith(("http://", "https://", "/media/", "/static/", "data:image/"))
+
+
+def validate_header_logo_path(asset_path: str) -> None:
+    """
+    Validate that the configured header logo uses a supported image format.
+    """
+    extension = os.path.splitext(asset_path)[1].lower()
+    if extension not in SUPPORTED_HEADER_LOGO_EXTENSIONS:
+        allowed = ", ".join(sorted(SUPPORTED_HEADER_LOGO_EXTENSIONS))
+        raise ValueError(
+            f"Unsupported header_logo format '{extension or '[no extension]'}'. "
+            f"Supported formats: {allowed}"
+        )
+
+
+def resolve_header_logo_src(config: dict) -> str:
+    """
+    Resolve the configured header logo to a value suitable for an <img src>.
+    """
+    header_logo = config.get("header_logo")
+    if not header_logo or header_logo in [None, "null", "default"]:
+        return ""
+
+    if is_direct_asset_url(header_logo):
+        return header_logo
+
+    resolved_logo = resolve_project_asset_path(header_logo, config, "header_logo file")
+    validate_header_logo_path(resolved_logo)
+
+    mime_type, _ = mimetypes.guess_type(resolved_logo)
+    if not mime_type or not mime_type.startswith("image/"):
+        raise ValueError(f"header_logo must be an image file: {header_logo}")
+
+    with open(resolved_logo, "rb") as logo_file:
+        encoded_logo = base64.b64encode(logo_file.read()).decode("ascii")
+
+    return f"data:{mime_type};base64,{encoded_logo}"
+
+
+def load_header_html(config: dict, header_file: str) -> str:
+    """
+    Load the shared header and optionally append project-level base CSS.
+    """
+    header = get_html(header_file, config)
+
+    base_css_file = config.get("base_css")
+    if not base_css_file:
+        return header
+
+    resolved_css_file = resolve_project_asset_path(base_css_file, config, "base_css file")
+    with open(resolved_css_file, "rt", encoding="utf-8") as css_file:
+        css_content = css_file.read()
+
+    return (
+        f"{header}\n"
+        "<style id=\"potato-project-base-css\">\n"
+        f"{css_content}\n"
+        "</style>\n"
+    )
+
+
+def load_project_base_css_html(config: dict) -> str:
+    """
+    Load project-level CSS for injection into the shared base template.
+    """
+    base_css_file = config.get("base_css")
+    if not base_css_file:
+        return ""
+
+    resolved_css_file = resolve_project_asset_path(base_css_file, config, "base_css file")
+    with open(resolved_css_file, "rt", encoding="utf-8") as css_file:
+        css_content = css_file.read()
+
+    return (
+        "<style id=\"potato-project-base-css\">\n"
+        f"{css_content}\n"
+        "</style>"
+    )
+
+
 def generate_annotation_html_template(config: dict) -> str:
     """
     Generates the full HTML file in site/ for annotating this tasks data,
@@ -345,10 +361,10 @@ def generate_annotation_html_template(config: dict) -> str:
     if not os.path.exists(header_file):
         raise FileNotFoundError("header_file not found: %s" % header_file)
 
-    with open(header_file, "rt", encoding="utf-8") as file_p:
-        header = "".join(file_p.readlines())
+    header = load_header_html(config, header_file)
 
     html_template = html_template.replace("{{ HEADER }}", header)
+    html_template = html_template.replace("{{ PROJECT_BASE_CSS }}", load_project_base_css_html(config))
 
     if config.get("jumping_to_id_disabled"):
         html_template = html_template.replace(
@@ -394,7 +410,7 @@ def generate_annotation_html_template(config: dict) -> str:
         logger.info(f"Using custom task layout file: {task_layout_file}")
 
         # Resolve the path relative to the config file
-        task_layout_file = resolve_project_asset_path(config, task_layout_file)
+        task_layout_file = resolve_project_asset_path(task_layout_file, config, "task_layout file")
 
         # Read the custom task layout
         with open(task_layout_file, "rt", encoding="utf-8") as f:
@@ -572,10 +588,11 @@ def generate_html_from_schematic(annotation_schemas: list[dict],
 
     # Load the header content we'll stuff in the template, which has scripts and assets we'll need
     logger.debug("Reading html header %s" % html_header_filename)
-    header = get_html(html_header_filename, config)
+    header = load_header_html(config, html_header_filename)
 
     # Once we have the base template constructed, load the user's custom layout for their task
     html_template = html_template.replace("{{ HEADER }}", header)
+    html_template = html_template.replace("{{ PROJECT_BASE_CSS }}", load_project_base_css_html(config))
 
     if allow_jumping_to_id:
         html_template = html_template.replace(
@@ -616,7 +633,7 @@ def generate_html_from_schematic(annotation_schemas: list[dict],
         logger.info(f"Using custom task layout file: {task_layout_file}")
 
         # Resolve the path relative to the config file
-        task_layout_file = resolve_project_asset_path(config, task_layout_file)
+        task_layout_file = resolve_project_asset_path(task_layout_file, config, "task_layout file")
 
         # Read the custom task layout
         with open(task_layout_file, "rt", encoding="utf-8") as f:

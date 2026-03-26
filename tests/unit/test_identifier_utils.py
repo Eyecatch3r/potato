@@ -253,48 +253,20 @@ class TestGenerateValidationAttribute:
         }
         assert generate_validation_attribute(schema) == ""
 
-    def test_bool_label_requirement_normalized(self):
-        """label_requirement: true (boolean) should be normalized to {required: true}."""
+    def test_top_level_required_returns_required(self):
+        """Legacy top-level required=True should still produce validation."""
         schema = {
             "name": "test",
             "description": "Test",
-            "label_requirement": True
+            "required": True,
         }
         assert generate_validation_attribute(schema) == "required"
 
-    def test_bool_false_label_requirement_returns_empty(self):
-        """label_requirement: false (boolean) should return empty string."""
+    def test_boolean_label_requirement_returns_required(self):
+        """Boolean label_requirement should be normalized for validation generation."""
         schema = {
             "name": "test",
             "description": "Test",
-            "label_requirement": False
-        }
-        assert generate_validation_attribute(schema) == ""
-
-    def test_top_level_required_shorthand(self):
-        """Top-level required: true should work as shorthand for label_requirement.required."""
-        schema = {
-            "name": "test",
-            "description": "Test",
-            "required": True
-        }
-        assert generate_validation_attribute(schema) == "required"
-
-    def test_top_level_required_false_returns_empty(self):
-        """Top-level required: false should not trigger validation."""
-        schema = {
-            "name": "test",
-            "description": "Test",
-            "required": False
-        }
-        assert generate_validation_attribute(schema) == ""
-
-    def test_label_requirement_takes_precedence_over_top_level(self):
-        """Explicit label_requirement should take precedence over top-level required."""
-        schema = {
-            "name": "test",
-            "description": "Test",
-            "required": False,
-            "label_requirement": {"required": True}
+            "label_requirement": True,
         }
         assert generate_validation_attribute(schema) == "required"

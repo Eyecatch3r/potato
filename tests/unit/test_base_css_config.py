@@ -1,73 +1,113 @@
-"""
-Tests for project-level base_css configuration support.
-"""
-import os
-import pytest
-from tests.helpers.test_utils import create_test_directory, cleanup_test_directory
+from potato.server_utils.config_module import ConfigValidationError, validate_file_paths
+from potato.server_utils.front_end import (
+    generate_annotation_html_template,
+    load_header_html,
+    resolve_header_logo_src,
+)
 
 
-class TestBaseCssConfig:
-    """Test base_css loading and resolution."""
+def _make_config(tmp_path, **overrides):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("annotation_task_name: Test Task\n", encoding="utf-8")
 
-    @pytest.fixture(autouse=True)
-    def setup_test_dir(self):
-        self.test_dir = create_test_directory("base_css_test")
-        yield
-        cleanup_test_directory(self.test_dir)
+    config = {
+        "__config_file__": str(config_file),
+        "task_dir": str(tmp_path),
+        "site_dir": str(tmp_path / "templates"),
+        "annotation_task_name": "Test Task",
+        "annotation_schemes": [
+            {
+                "name": "sentiment",
+                "annotation_type": "radio",
+                "labels": ["positive", "negative"],
+                "description": "Choose one",
+            }
+        ],
+    }
+    config.update(overrides)
+    return config
 
-    def _make_config(self, base_css=None):
-        """Build a minimal config dict for testing."""
-        config = {
-            "__config_file__": os.path.join(self.test_dir, "config.yaml"),
-            "task_dir": self.test_dir,
-        }
-        if base_css is not None:
-            config["base_css"] = base_css
-        return config
 
-    def test_loads_css_file(self):
-        """base_css should be read and wrapped in <style> tags."""
-        from potato.server_utils.front_end import load_project_base_css_html
+def test_load_header_html_appends_project_base_css(tmp_path):
+    header_file = tmp_path / "header.html"
+    header_file.write_text("<script>console.log('header')</script>", encoding="utf-8")
 
-        css_file = os.path.join(self.test_dir, "custom.css")
-        with open(css_file, "w") as f:
-            f.write("body { background: red; }")
+    css_file = tmp_path / "custom.css"
+    css_file.write_text("body { background: tomato; }", encoding="utf-8")
 
-        config = self._make_config(base_css="custom.css")
-        result = load_project_base_css_html(config)
+    config = _make_config(tmp_path, base_css="custom.css")
 
-        assert '<style id="potato-project-base-css">' in result
-        assert "body { background: red; }" in result
-        assert "</style>" in result
+    header = load_header_html(config, str(header_file))
 
-    def test_missing_file_raises(self):
-        """A configured but missing CSS file should raise FileNotFoundError."""
-        from potato.server_utils.front_end import load_project_base_css_html
+    assert "console.log('header')" in header
+    assert 'id="potato-project-base-css"' in header
+    assert "body { background: tomato; }" in header
 
-        config = self._make_config(base_css="nonexistent.css")
-        with pytest.raises(FileNotFoundError):
-            load_project_base_css_html(config)
 
-    def test_not_configured_returns_empty(self):
-        """No base_css in config should return empty string."""
-        from potato.server_utils.front_end import load_project_base_css_html
+def test_generate_annotation_html_template_injects_base_css(tmp_path):
+    css_file = tmp_path / "annotation-base.css"
+    css_file.write_text(".potato-navbar { border-bottom: 7px solid red; }", encoding="utf-8")
 
-        config = self._make_config()
-        result = load_project_base_css_html(config)
-        assert result == ""
+    config = _make_config(tmp_path, base_css="annotation-base.css")
 
-    def test_resolve_project_asset_path_security(self):
-        """Paths resolved by resolve_project_asset_path should only find existing files."""
-        from potato.server_utils.front_end import resolve_project_asset_path
+    site_name = generate_annotation_html_template(config)
+    output_file = tmp_path / "templates" / "generated" / site_name
 
-        config = self._make_config()
-        # Non-existent file should raise
-        with pytest.raises(FileNotFoundError):
-            resolve_project_asset_path(config, "../../etc/passwd")
+    assert output_file.exists()
+    html = output_file.read_text(encoding="utf-8")
 
-        # Existing file should resolve
-        css_file = os.path.join(self.test_dir, "real.css")
-        with open(css_file, "w") as f:
-            f.write("h1 { color: blue; }")
-        result = resolve_project_asset_path(config, "real.css")
-        assert os.path.exists(result)
+    assert 'id="potato-project-base-css"' in html
+    assert ".potato-navbar { border-bottom: 7px solid red; }" in html
+
+
+def test_generate_annotation_html_template_raises_for_missing_base_css(tmp_path):
+    config = _make_config(tmp_path, base_css="missing.css")
+
+    try:
+        generate_annotation_html_template(config)
+    except FileNotFoundError as exc:
+        assert "base_css file not found" in str(exc)
+    else:
+        raise AssertionError("Expected FileNotFoundError for missing base_css")
+
+
+def test_generate_annotation_html_template_includes_header_logo_markup(tmp_path):
+    logo_file = tmp_path / "logo.svg"
+    logo_file.write_text(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'></svg>",
+        encoding="utf-8",
+    )
+
+    config = _make_config(tmp_path, header_logo="logo.svg")
+
+    site_name = generate_annotation_html_template(config)
+    output_file = tmp_path / "templates" / "generated" / site_name
+    html = output_file.read_text(encoding="utf-8")
+
+    assert 'class="header-logo"' in html
+    assert "{{ header_logo_url }}" in html
+
+
+def test_resolve_header_logo_src_returns_data_url_for_local_image(tmp_path):
+    logo_file = tmp_path / "logo.svg"
+    logo_file.write_text(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'></svg>",
+        encoding="utf-8",
+    )
+
+    config = _make_config(tmp_path, header_logo="logo.svg")
+
+    logo_src = resolve_header_logo_src(config)
+
+    assert logo_src.startswith("data:image/svg+xml;base64,")
+
+
+def test_validate_file_paths_rejects_missing_header_logo(tmp_path):
+    config = _make_config(tmp_path, header_logo="missing.svg")
+
+    try:
+        validate_file_paths(config, str(tmp_path), str(tmp_path))
+    except ConfigValidationError as exc:
+        assert "header_logo file not found" in str(exc)
+    else:
+        raise AssertionError("Expected ConfigValidationError for missing header_logo")

@@ -503,7 +503,11 @@ def generate_slider_layout(annotation_scheme):
     return safe_generate_layout(annotation_scheme, generate_slider_layout_internal)
 
 def generate_slider_layout_internal(annotation_scheme):
-    from .identifier_utils import escape_html_content, generate_element_identifier, generate_validation_attribute
+    from .identifier_utils import (
+        escape_html_content,
+        generate_element_identifier,
+        generate_validation_attribute,
+    )
     
     if "labels" in annotation_scheme:
         return generate_radio_layout(annotation_scheme, horizontal=False)
