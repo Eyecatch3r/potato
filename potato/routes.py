@@ -1656,6 +1656,17 @@ def _check_required_or_block(user_state, instance_id: str):
     return None
 
 
+def _has_annotation_work_remaining(user_state) -> bool:
+    """Return True when the user still has assigned or assignable annotation work."""
+    annotated_ids = user_state.get_annotated_instance_ids()
+
+    for instance_id in user_state.instance_id_ordering:
+        if instance_id not in annotated_ids:
+            return True
+
+    return get_item_state_manager().get_total_assignable_items_for_user(user_state) > 0
+
+
 def _ibws_check_and_advance(user_state) -> bool:
     """Check if IBWS round is complete and advance to next round if so.
 
@@ -1793,7 +1804,7 @@ def annotate():
         _ibws_check_and_advance(user_state)
 
     # See if this user has finished annotating all of their assigned instances
-    if not user_state.has_remaining_assignments():
+    if not _has_annotation_work_remaining(user_state):
         # For IBWS, don't advance phase if more rounds are possible
         if config.get("ibws_config"):
             from potato.ibws_manager import get_ibws_manager
@@ -1855,10 +1866,15 @@ def annotate():
         if block_response is not None:
             return block_response
 
+        if user_state.is_at_end_index() and not _has_annotation_work_remaining(user_state):
+            logger.debug(f"User {username} completed the final available annotation item")
+            get_user_state_manager().advance_phase(username)
+            return redirect(url_for("home"))
+
         moved_forward = move_to_next_instance(username)
         if not moved_forward and user_state.is_at_end_index():
             logger.debug(f"User {username} reached the end of assigned instances")
-            if not user_state.has_remaining_assignments():
+            if not _has_annotation_work_remaining(user_state):
                 # IBWS: try to advance round before giving up
                 if config.get("ibws_config"):
                     advanced = _ibws_check_and_advance(user_state)
@@ -1939,7 +1955,7 @@ def annotate():
 
     # After processing the action, check again if user has completed all assignments
     # This handles the case where the user just finished their last item
-    if not user_state.has_remaining_assignments():
+    if not _has_annotation_work_remaining(user_state):
         if config.get("ibws_config"):
             from potato.ibws_manager import get_ibws_manager
             ibws_mgr = get_ibws_manager()
