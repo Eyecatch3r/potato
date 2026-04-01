@@ -138,6 +138,9 @@ def _register_builtin_converters():
     from .converters.openai_converter import OpenAIConverter
     from .converters.multi_agent_converter import MultiAgentConverter
     from .converters.web_agent_converter import WebAgentConverter
+    from .converters.claude_code_converter import ClaudeCodeConverter
+    from .converters.aider_converter import AiderConverter
+    from .converters.swe_agent_trajectory_converter import SWEAgentTrajectoryConverter
 
     converters = [
         # Existing converters (specific formats first)
@@ -150,8 +153,11 @@ def _register_builtin_converters():
         WebArenaConverter(),
         # New converters (specific-to-generic order)
         SWEBenchConverter(),
+        SWEAgentTrajectoryConverter(),  # SWE-Agent trajectories before generic
+        AiderConverter(),               # Aider edit blocks
         OTELConverter(),
         MCPConverter(),
+        ClaudeCodeConverter(),  # Before Anthropic (more specific: coding tool names)
         AnthropicConverter(),
         OpenAIConverter(),
         MultiAgentConverter(),

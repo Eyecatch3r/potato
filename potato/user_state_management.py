@@ -500,6 +500,14 @@ class UserStateManager:
         self.logger.setLevel(logging.DEBUG)
         logging.basicConfig()
 
+        # Auto-export configuration
+        export_formats = config.get("export_annotation_format", [])
+        if isinstance(export_formats, str):
+            export_formats = [export_formats] if export_formats else []
+        self._auto_export_formats = export_formats
+        self._auto_export_interval = config.get("auto_export_interval", 60)
+        self._last_auto_export_time = 0
+
     def add_phase(self, phase_type: UserPhase, phase_name: str, page_fname: str):
         """
         Add a phase page to the phase mapping.
@@ -680,18 +688,39 @@ class UserStateManager:
                     ),
                 )
 
-    def retreat_phase(self, user_id: str) -> None:
-        '''Moves the user to the previous page in the current phase or the previous phase'''
+    def retreat_phase(self, user_id: str) -> bool:
+        '''Moves the user to the previous page in the current phase, or to the
+        previous configured phase if ``allow_phase_back_navigation`` is enabled.
+
+        Returns True if the user was moved, False if navigation was blocked.
+        '''
         user_state = self.get_user_state(user_id)
-        phase, page = self.get_prev_user_phase_page(user_id)
-        user_state.advance_to_phase(phase, page)
+        cur_phase, cur_page = user_state.get_current_phase_and_page()
+        prev_phase, prev_page = self.get_prev_user_phase_page(user_id)
 
-    def _get_configured_phase_sequence(self) -> list[UserPhase]:
-        '''Returns configured phases in workflow order with duplicate phase types deduplicated.'''
-        config_phases = []
+        # If the target is a different phase, only allow when config permits
+        if prev_phase != cur_phase:
+            if not self.config.get('allow_phase_back_navigation', False):
+                return False
 
+        # Don't move if we'd stay in the same place
+        if prev_phase == cur_phase and prev_page == cur_page:
+            return False
+
+        user_state.advance_to_phase(prev_phase, prev_page)
+        return True
+
+    def _get_configured_phase_sequence(self) -> list:
+        '''Return the ordered list of UserPhase enums derived from the config.
+
+        If ``phases.order`` is present in the config, that order is used
+        (with ``UserPhase.ANNOTATION`` appended if missing).  Otherwise
+        falls back to the enum declaration order filtered to phases that
+        have registered page templates.
+        '''
         if "phases" in self.config and "order" in self.config["phases"]:
             config_phase_order = self.config["phases"]["order"]
+            config_phases = []
             for phase_name in config_phase_order:
                 if phase_name == "annotation":
                     if UserPhase.ANNOTATION not in config_phases:
@@ -699,14 +728,15 @@ class UserStateManager:
                 elif phase_name in self.config["phases"]:
                     phase_type_str = self.config["phases"][phase_name]["type"]
                     phase_type = UserPhase.fromstr(phase_type_str)
-                    if phase_type in self.phase_type_to_name_to_page and phase_type not in config_phases:
-                        config_phases.append(phase_type)
+                    if phase_type in self.phase_type_to_name_to_page:
+                        if phase_type not in config_phases:
+                            config_phases.append(phase_type)
 
             if UserPhase.ANNOTATION not in config_phases:
                 config_phases.append(UserPhase.ANNOTATION)
             return config_phases
-
-        return [p for p in list(UserPhase) if p in self.phase_type_to_name_to_page]
+        else:
+            return [p for p in list(UserPhase) if p in self.phase_type_to_name_to_page]
 
     def get_next_user_phase_page(self, user_id: str) -> tuple[UserPhase,str]:
         '''Returns the name and filename of next the page for the user, either
@@ -733,59 +763,57 @@ class UserStateManager:
                     return cur_phase, next_page
 
         # If there are no more pages in this phase, return the next phase.
-        # Use the config's phase order instead of the enum order
-        if "phases" in self.config and "order" in self.config["phases"]:
-            config_phases = self._get_configured_phase_sequence()
-            if cur_phase in config_phases:
-                cur_phase_index = config_phases.index(cur_phase)
-                if cur_phase_index < len(config_phases) - 1:
-                    next_phase = config_phases[cur_phase_index + 1]
-                    # ANNOTATION phase is handled by the annotate route
-                    # and doesn't have entries in phase_type_to_name_to_page
-                    if next_phase == UserPhase.ANNOTATION:
-                        return next_phase, None
-                    # Use the first page in the next phase
-                    next_page = list(self.phase_type_to_name_to_page[next_phase].keys())[0]
-                    return next_phase, next_page
-                else:
-                    pass # Current phase is last in config order
-            else:
-                # Current phase not in config_phases (e.g., LOGIN).
-                # Advance to the first config phase.
-                if config_phases:
-                    first_phase = config_phases[0]
-                    if first_phase == UserPhase.ANNOTATION:
-                        return first_phase, None
-                    first_page = list(self.phase_type_to_name_to_page[first_phase].keys())[0]
-                    return first_phase, first_page
-        else:
-            # Fallback to enum order if no config order is specified
-            all_phases = self._get_configured_phase_sequence()
-            cur_phase_index = all_phases.index(cur_phase)
-            if cur_phase_index < len(all_phases) - 1:
-                next_phase = all_phases[cur_phase_index + 1]
+        config_phases = self._get_configured_phase_sequence()
+
+        if cur_phase in config_phases:
+            cur_phase_index = config_phases.index(cur_phase)
+            if cur_phase_index < len(config_phases) - 1:
+                next_phase = config_phases[cur_phase_index + 1]
+                # ANNOTATION phase is handled by the annotate route
+                # and doesn't have entries in phase_type_to_name_to_page
+                if next_phase == UserPhase.ANNOTATION:
+                    return next_phase, None
                 # Use the first page in the next phase
                 next_page = list(self.phase_type_to_name_to_page[next_phase].keys())[0]
                 return next_phase, next_page
+        else:
+            # Current phase not in config_phases (e.g., LOGIN).
+            # Advance to the first config phase.
+            if config_phases:
+                first_phase = config_phases[0]
+                if first_phase == UserPhase.ANNOTATION:
+                    return first_phase, None
+                first_page = list(self.phase_type_to_name_to_page[first_phase].keys())[0]
+                return first_phase, first_page
 
         return UserPhase.DONE, None
 
     def get_prev_user_phase_page(self, user_id: str) -> tuple[UserPhase, str]:
-        '''Returns the previous page for the user, either within the same phase or the previous phase.'''
+        '''Returns the previous page for the user, either in the current phase
+           or the previous configured phase.'''
+
         user_state = self.get_user_state(user_id)
         cur_phase, cur_page = user_state.get_current_phase_and_page()
 
         if cur_phase == UserPhase.LOGIN:
             return UserPhase.LOGIN, None
 
-        page2file_for_cur_phase = self.phase_type_to_name_to_page.get(cur_phase, {})
-        if len(page2file_for_cur_phase) > 1 and cur_page is not None:
-            pages_for_cur_phase = list(page2file_for_cur_phase.keys())
-            if cur_page in pages_for_cur_phase:
+        if cur_phase == UserPhase.DONE:
+            config_phases = self._get_configured_phase_sequence()
+            if config_phases:
+                prev_phase = config_phases[-1]
+                if prev_phase == UserPhase.ANNOTATION:
+                    return prev_phase, None
+                prev_page = list(self.phase_type_to_name_to_page[prev_phase].keys())[-1]
+                return prev_phase, prev_page
+            return UserPhase.LOGIN, None
+
+        if cur_phase != UserPhase.ANNOTATION and cur_phase in self.phase_type_to_name_to_page:
+            pages_for_cur_phase = list(self.phase_type_to_name_to_page[cur_phase].keys())
+            if len(pages_for_cur_phase) > 1 and cur_page in pages_for_cur_phase:
                 cur_page_index = pages_for_cur_phase.index(cur_page)
                 if cur_page_index > 0:
-                    prev_page = pages_for_cur_phase[cur_page_index - 1]
-                    return cur_phase, prev_page
+                    return cur_phase, pages_for_cur_phase[cur_page_index - 1]
 
         config_phases = self._get_configured_phase_sequence()
         if cur_phase in config_phases:
@@ -794,9 +822,7 @@ class UserStateManager:
                 prev_phase = config_phases[cur_phase_index - 1]
                 if prev_phase == UserPhase.ANNOTATION:
                     return prev_phase, None
-
-                prev_pages = list(self.phase_type_to_name_to_page[prev_phase].keys())
-                prev_page = prev_pages[-1] if prev_pages else None
+                prev_page = list(self.phase_type_to_name_to_page[prev_phase].keys())[-1]
                 return prev_phase, prev_page
 
         return cur_phase, cur_page
@@ -835,6 +861,67 @@ class UserStateManager:
 
         # Save the user state
         user_state.save(user_dir)
+
+        # Trigger auto-export if configured
+        self._maybe_auto_export()
+
+    def _maybe_auto_export(self):
+        """Run auto-export if configured and enough time has passed since last export."""
+        if not self._auto_export_formats:
+            return
+
+        import time
+        now = time.time()
+        if now - self._last_auto_export_time < self._auto_export_interval:
+            return
+
+        self._last_auto_export_time = now
+
+        try:
+            self._run_auto_export()
+        except Exception as e:
+            self.logger.error(f"Auto-export failed: {e}")
+
+    def _run_auto_export(self):
+        """Execute auto-export for all configured formats."""
+        from potato.export.registry import export_registry
+        from potato.export.base import ExportContext
+        from potato.export.cli import load_annotations_from_output_dir, load_phase_responses_from_output_dir
+
+        output_dir = self.config["output_annotation_dir"]
+        schemas = self.config.get("annotation_schemes", [])
+        annotations = load_annotations_from_output_dir(output_dir, schemas)
+
+        if not annotations:
+            return
+
+        phase_responses = load_phase_responses_from_output_dir(output_dir) if self.config.get("export_include_phase_data", False) else []
+
+        context = ExportContext(
+            config=self.config,
+            annotations=annotations,
+            items={},  # Items not needed for tabular exports
+            schemas=schemas,
+            output_dir=output_dir,
+            phase_responses=phase_responses,
+        )
+
+        export_output_dir = os.path.join(output_dir, "exports")
+
+        for fmt in self._auto_export_formats:
+            if not export_registry.is_registered(fmt):
+                self.logger.warning(f"Auto-export format '{fmt}' is not registered, skipping")
+                continue
+
+            try:
+                fmt_output = os.path.join(export_output_dir, fmt)
+                result = export_registry.export(fmt, context, fmt_output)
+                if result.success:
+                    self.logger.info(f"Auto-export to {fmt}: {result.files_written}")
+                else:
+                    self.logger.warning(f"Auto-export to {fmt} failed: {result.errors}")
+            except Exception as e:
+                self.logger.error(f"Auto-export to {fmt} error: {e}")
 
     def load_user_state(self, user_dir: str) -> UserState:
         '''Loads the user state for the given user ID'''
@@ -1717,11 +1804,18 @@ class InMemoryUserState(UserState):
         if self.current_instance_index >= len(self.instance_id_ordering):
             return None
         inst_id = self.instance_id_ordering[self.current_instance_index]
-        return get_item_state_manager().get_item(inst_id)
+        ism = get_item_state_manager()
+        if not ism.has_item(inst_id):
+            # Item may be a dynamically injected QC item that wasn't
+            # rehydrated after restart. Skip it gracefully.
+            logger.warning(f"Instance '{inst_id}' in user ordering but not in item manager, skipping")
+            return None
+        return ism.get_item(inst_id)
 
     def get_current_instance_id(self) -> str:
         '''Returns the ID of the instance that the user is currently annotating'''
-        return self.get_current_instance().get_id()
+        instance = self.get_current_instance()
+        return instance.get_id() if instance else None
 
     def get_labels(self) -> dict[str, dict[str, str]]:
         return self.labels
@@ -2031,16 +2125,10 @@ class InMemoryUserState(UserState):
         return self.user_id
 
     def get_annotated_instance_ids(self) -> set[str]:
-        annotated_ids = set(self.instance_id_to_label_to_value.keys()) \
+        return set(self.instance_id_to_label_to_value.keys()) \
                     | set(self.instance_id_to_span_to_value.keys()) \
                     | set(self.instance_id_to_link_to_value.keys()) \
                     | set(self.instance_id_to_event_to_value.keys())
-
-        assigned_ids = set(self.instance_id_ordering) | set(self.assigned_instance_ids)
-        return {
-            instance_id for instance_id in annotated_ids
-            if instance_id and instance_id in assigned_ids
-        }
 
     def get_annotation_count(self) -> int:
         '''Returns the total number of instances annotated by this user.'''
@@ -2078,8 +2166,6 @@ class InMemoryUserState(UserState):
 
     def has_annotated(self, instance_id: str) -> bool:
         '''Returns True if the user has annotated the instance with the given ID'''
-        if not instance_id:
-            return False
         return instance_id in self.instance_id_to_label_to_value \
             or instance_id in self.instance_id_to_span_to_value \
             or instance_id in self.instance_id_to_link_to_value \

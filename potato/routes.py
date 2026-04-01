@@ -50,7 +50,7 @@ from potato.flask_server import (
     get_users, get_total_annotations, update_annotation_state, ai_hints,
     get_training_instances, get_training_correct_answers, get_training_explanation,
     get_training_instance_categories, get_prolific_study, get_keyword_highlight_patterns,
-    get_keyword_highlight_settings, get_phase_annotation_schemes
+    get_keyword_highlight_settings
 )
 
 # Import admin dashboard functionality
@@ -212,96 +212,19 @@ def apply_debug_phase_skip(user_id: str) -> bool:
 
     return False
 
-# Cache for auto-generated admin API key
-_generated_admin_api_key = None
+# Admin API key resolution — delegated to shared utility
+from potato.server_utils.admin_key import (
+    get_admin_api_key as _get_admin_api_key,
+    validate_admin_api_key as _validate_admin_api_key,
+)
 
 def get_admin_api_key():
-    """Get the admin API key from config, environment variable, or auto-generate one.
-
-    Priority order:
-    1. Config file: admin_api_key setting
-    2. Environment variable: POTATO_ADMIN_API_KEY
-    3. Auto-generated: Creates a random key and saves it to {task_dir}/admin_api_key.txt
-
-    Returns:
-        str or None: The admin API key, or None if generation fails.
-    """
-    global _generated_admin_api_key
-
-    # Check config first
-    configured_key = config.get("admin_api_key")
-    if configured_key:
-        return configured_key
-
-    # Check environment variable
-    env_key = os.environ.get("POTATO_ADMIN_API_KEY")
-    if env_key:
-        return env_key
-
-    # Return cached generated key if we have one
-    if _generated_admin_api_key:
-        return _generated_admin_api_key
-
-    # Auto-generate a key and save it to task directory
-    task_dir = config.get("task_dir", ".")
-    if not task_dir:
-        task_dir = "."
-
-    key_file_path = os.path.join(task_dir, "admin_api_key.txt")
-
-    # Check if a key file already exists (from previous run)
-    if os.path.exists(key_file_path):
-        try:
-            with open(key_file_path, 'r', encoding='utf-8') as f:
-                existing_key = f.read().strip()
-                if existing_key:
-                    _generated_admin_api_key = existing_key
-                    logger.info(f"Loaded existing admin API key from {key_file_path}")
-                    return _generated_admin_api_key
-        except Exception as e:
-            logger.warning(f"Could not read existing admin API key file: {e}")
-
-    # Generate a new key
-    import secrets
-    _generated_admin_api_key = secrets.token_urlsafe(32)
-
-    # Save to file
-    try:
-        with open(key_file_path, 'w', encoding='utf-8') as f:
-            f.write(_generated_admin_api_key)
-        logger.info(f"Generated admin API key and saved to {key_file_path}")
-        logger.info(f"Use this key to access the admin dashboard at /admin")
-    except Exception as e:
-        logger.warning(f"Could not save admin API key to file: {e}")
-        logger.info(f"Auto-generated admin API key (not persisted): {_generated_admin_api_key}")
-
-    return _generated_admin_api_key
+    """Get the admin API key. See potato.server_utils.admin_key for details."""
+    return _get_admin_api_key(config)
 
 def validate_admin_api_key(provided_key: str) -> bool:
-    """Validate an admin API key against the configured or auto-generated key.
-
-    In debug mode, admin endpoints are accessible without a key.
-    Otherwise, the provided key must match the configured or auto-generated key.
-
-    Args:
-        provided_key: The API key provided in the request.
-
-    Returns:
-        bool: True if the key is valid or debug mode is enabled.
-    """
-    debug_val = config.get("debug", False)
-    if debug_val:
-        return True
-
-    expected_key = get_admin_api_key()
-    if not expected_key:
-        # This should rarely happen since we auto-generate keys
-        logger.warning("Could not obtain admin API key")
-        return False
-
-    # Use constant-time comparison to prevent timing attacks
-    import hmac
-    return hmac.compare_digest(str(provided_key or ""), expected_key)
+    """Validate an admin API key. See potato.server_utils.admin_key for details."""
+    return _validate_admin_api_key(provided_key, config)
 
 
 # -------------------------------------------------------------------
@@ -1111,28 +1034,11 @@ def register():
     # Register the user with the authenticator
     logger.debug("Adding user to authenticator...")
     user_authenticator = UserAuthenticator.get_instance()
-    registration_result = user_authenticator.add_user(username, password)
+    result = user_authenticator.add_user(username, password)
 
-    if registration_result != "Success":
-        logger.warning(
-            "Registration failed for user '%s' with result: %s",
-            username,
-            registration_result,
-        )
-        error_messages = {
-            "Duplicate user": "Registration failed: username already exists. Please sign in instead.",
-            "Unauthorized user": "Registration failed: this username is not authorized.",
-        }
-        return render_template(
-            "home.html",
-            login_error=error_messages.get(
-                registration_result,
-                "Registration failed. Please try again.",
-            ),
-            login_email=username,
-            title=config.get("annotation_task_name", "Annotation Platform"),
-            require_password=config.get("require_password", True),
-        )
+    if result != "Success":
+        logger.warning(f"Registration failed for '{username}': {result}")
+        return render_template("home.html", login_error=result)
 
     # Persist user config if explicitly configured
     user_authenticator.save_user_config()
@@ -1687,6 +1593,122 @@ def prestudy():
         logger.debug("GET <-- PRESTUDY")
         return get_current_page_html(config, username)
 
+def _scheme_is_required(scheme: dict) -> bool:
+    """Check if an annotation scheme is marked as required."""
+    # required: true at top level
+    if scheme.get("required") is True:
+        return True
+    # label_requirement: true (bool) or label_requirement.required: true
+    lr = scheme.get("label_requirement", {})
+    if lr is True:
+        return True
+    if isinstance(lr, dict) and lr.get("required") is True:
+        return True
+    return False
+
+
+def _scheme_has_required_annotation(user_state, instance_id: str, scheme: dict) -> bool:
+    """Check whether a specific required scheme has been annotated for the given instance."""
+    schema_name = scheme.get("name", "")
+
+    # Check label annotations — keys are Label objects with .get_schema() and .get_name()
+    label_annotations = user_state.instance_id_to_label_to_value.get(instance_id, {})
+    for label_key, value in label_annotations.items():
+        if hasattr(label_key, 'get_schema') and label_key.get_schema() == schema_name:
+            # Found a label for this schema — check if it has a truthy value
+            if value:
+                return True
+
+    # Check span annotations
+    span_annotations = user_state.instance_id_to_span_to_value.get(instance_id, {})
+    if span_annotations:
+        # Span annotations are stored differently — check if any spans exist
+        if isinstance(span_annotations, dict) and span_annotations:
+            return True
+        elif isinstance(span_annotations, list) and len(span_annotations) > 0:
+            return True
+
+    return False
+
+
+def _instance_meets_required_annotation_rules(user_state, instance_id: str) -> list:
+    """Check if all required annotation schemes are satisfied for an instance.
+
+    Returns a list of unsatisfied scheme names (empty if all satisfied).
+    """
+    unsatisfied = []
+    for scheme in config.get("annotation_schemes", []):
+        if _scheme_is_required(scheme) and not _scheme_has_required_annotation(user_state, instance_id, scheme):
+            unsatisfied.append(scheme.get("name", "unknown"))
+    return unsatisfied
+
+
+def _check_required_or_block(user_state, instance_id: str):
+    """Check required annotations and return a 400 response if not met, or None if OK."""
+    unsatisfied = _instance_meets_required_annotation_rules(user_state, instance_id)
+    if unsatisfied:
+        msg = f"Required annotation(s) not completed: {', '.join(unsatisfied)}"
+        logger.info(f"Blocking navigation: {msg} for instance {instance_id}")
+        if request.is_json:
+            return jsonify({"status": "validation_error", "message": msg, "unsatisfied_schemas": unsatisfied}), 400
+        # For form POSTs, fall through to render the page with existing annotations
+        return None
+    return None
+
+
+def _ibws_check_and_advance(user_state) -> bool:
+    """Check if IBWS round is complete and advance to next round if so.
+
+    Returns True if new tuples were added and the user was reassigned.
+    """
+    from potato.ibws_manager import get_ibws_manager
+
+    ibws_mgr = get_ibws_manager()
+    if not ibws_mgr or ibws_mgr.is_completed():
+        return False
+
+    ism = get_item_state_manager()
+    usm = get_user_state_manager()
+
+    # Find the BWS schema name
+    bws_schema_name = None
+    for scheme in config.get("annotation_schemes", []):
+        if scheme.get("annotation_type") == "bws":
+            bws_schema_name = scheme["name"]
+            break
+
+    if not bws_schema_name:
+        return False
+
+    if not ibws_mgr.check_round_complete(ism, bws_schema_name):
+        return False
+
+    # Round is complete — advance to next round
+    logger.info(f"IBWS: Round {ibws_mgr.current_round} complete, advancing")
+    new_tuples = ibws_mgr.advance_round(ism, usm, bws_schema_name)
+
+    if not new_tuples:
+        logger.info("IBWS: No more rounds needed, annotation complete")
+        return False
+
+    # Add new tuples to ISM
+    id_key = config["item_properties"]["id_key"]
+    for t in new_tuples:
+        ism.add_item(str(t[id_key]), t)
+
+    # Re-render displayed text for new items
+    from potato.flask_server import _render_displayed_text
+    text_key = config["item_properties"]["text_key"]
+    _render_displayed_text(text_key)
+
+    # Reassign instances to all active users
+    for us in usm.get_all_users():
+        ism.assign_instances_to_user(us)
+
+    logger.info(f"IBWS: Added {len(new_tuples)} new tuples for round {ibws_mgr.current_round}")
+    return True
+
+
 @app.route("/annotate", methods=["GET", "POST"])
 def annotate():
     """
@@ -1723,44 +1745,33 @@ def annotate():
     logger.debug(f"User state: {user_state}")
     logger.debug(f"User state phase: {user_state.get_phase() if user_state else 'No user state'}")
 
-    leaked_navigation_actions = {
-        "prev_instance",
-        "next_instance",
-        "go_to",
-        "jump_to_unannotated",
-        "jump_to_unannotated_prev",
-    }
-    request_json = request.get_json(silent=True) if request.is_json else None
-    pending_action = None
-    if request_json:
-        pending_action = request_json.get("action")
-    elif "action" in request.form:
-        pending_action = request.form.get("action")
-
-    # Check user phase
+    # Check user phase — guard against leaked nav button POSTs from non-annotation pages
     if not user_state or user_state.get_phase() != UserPhase.ANNOTATION:
-        logger.info(f"User {username} not in annotation phase, redirecting. Phase: {user_state.get_phase() if user_state else 'No user state'}")
-        if request.method == "POST":
-            logger.debug(
-                "Non-annotation /annotate POST received. pending_action=%r request_json=%r",
-                pending_action,
-                request_json,
-            )
-        if request.method == "POST" and (pending_action in leaked_navigation_actions or request.is_json):
-            if user_state:
-                if pending_action == "prev_instance":
-                    get_user_state_manager().retreat_phase(username)
+        cur_phase = user_state.get_phase() if user_state else None
+        logger.info(f"User {username} not in annotation phase (phase={cur_phase}), redirecting.")
+
+        # If a nav POST arrived from a non-annotation page, handle it gracefully
+        if request.method == 'POST':
+            action = None
+            if request.is_json and request.json:
+                action = request.json.get('action')
+            elif request.form:
+                action = request.form.get('action')
+
+            if action == 'next_instance':
+                # Treat as "submit current phase page" - advance to next phase
+                logger.info(f"Leaked next_instance from phase {cur_phase}, advancing phase")
+                get_user_state_manager().advance_phase(username)
+                return redirect(url_for("home"))
+            elif action == 'prev_instance':
+                if get_user_state_manager().retreat_phase(username):
+                    logger.info(f"Leaked prev_instance from phase {cur_phase}, moved to previous page/phase")
                 else:
-                    logger.debug(
-                        "Non-annotation next-style navigation for %s on phase %s",
-                        username,
-                        user_state.get_phase(),
-                    )
-                    get_user_state_manager().advance_phase(username)
-            # Force a clean GET so shared annotation nav controls rendered on
-            # phase pages do not accidentally submit the current phase and
-            # advance the workflow.
-            return redirect(url_for("home"))
+                    logger.info(f"Leaked prev_instance from phase {cur_phase}, back navigation not allowed")
+                return redirect(url_for("home"))
+
+        # For non-nav POSTs (phase form submissions) and GETs, delegate to home()
+        # so POST data is preserved for phase processing
         return home()
 
     # If the user hasn't yet been assigned anything to annotate, do so now
@@ -1777,11 +1788,27 @@ def annotate():
                 logger.info(f"Adjudicator {username} has no annotation items, redirecting to /adjudicate")
                 return redirect(url_for("adjudicate"))
 
+    # IBWS: Check if round is complete and advance if needed
+    if config.get("ibws_config"):
+        _ibws_check_and_advance(user_state)
+
     # See if this user has finished annotating all of their assigned instances
-    if _user_has_completed_required_assignments(user_state):
-        logger.debug(f"User {username} has no remaining assignments, advancing phase")
-        get_user_state_manager().advance_phase(username)
-        return redirect(url_for("home"))
+    if not user_state.has_remaining_assignments():
+        # For IBWS, don't advance phase if more rounds are possible
+        if config.get("ibws_config"):
+            from potato.ibws_manager import get_ibws_manager
+            ibws_mgr = get_ibws_manager()
+            if ibws_mgr and not ibws_mgr.is_completed():
+                # Still waiting for other annotators to finish the round
+                pass
+            else:
+                logger.debug(f"User {username} has no remaining assignments (IBWS complete), advancing phase")
+                get_user_state_manager().advance_phase(username)
+                return redirect(url_for("home"))
+        else:
+            logger.debug(f"User {username} has no remaining assignments, advancing phase")
+            get_user_state_manager().advance_phase(username)
+            return redirect(url_for("home"))
 
     _inject_quality_control_item_if_needed(username, user_state)
 
@@ -1809,35 +1836,46 @@ def annotate():
 
     if action == "prev_instance":
         logger.debug(f"Moving to previous instance for user: {username}")
-        move_to_prev_instance(username)
+        moved_back = move_to_prev_instance(username)
+        if not moved_back and user_state.get_current_instance_index() <= 0:
+            if get_user_state_manager().retreat_phase(username):
+                logger.debug(f"User {username} at first annotation instance, moved back to previous phase/page")
+                return redirect(url_for("home"))
+            else:
+                logger.debug(f"User {username} at first annotation instance, back navigation not allowed")
         acm = get_ai_cache_manager()
         if acm:
             acm.start_prefetch(user_state.current_instance_index,
                                getattr(acm, "prefetch_page_count_on_prev", 0) )
     elif action == "next_instance":
-        current_instance_id = user_state.get_current_instance_id()
-        if current_instance_id and not _instance_meets_required_annotation_rules(user_state, current_instance_id):
-            logger.debug(
-                "Blocking next_instance for user %s on instance %s because required annotations are incomplete",
-                username,
-                current_instance_id,
-            )
-            if request.is_json:
-                return jsonify({
-                    "status": "validation_error",
-                    "message": "Please complete the required annotations before continuing.",
-                }), 400
-            response = make_response(render_page_with_annotations(username))
-            response.status_code = 400
-            return response
         logger.debug(f"Moving to next instance for user: {username}")
+        # Check required annotations before allowing forward navigation
+        current_id = user_state.get_current_instance_id()
+        block_response = _check_required_or_block(user_state, current_id)
+        if block_response is not None:
+            return block_response
+
         moved_forward = move_to_next_instance(username)
         if not moved_forward and user_state.is_at_end_index():
             logger.debug(f"User {username} reached the end of assigned instances")
             if not user_state.has_remaining_assignments():
-                logger.debug(f"User {username} completed all assignments at end-of-list")
-                get_user_state_manager().advance_phase(username)
-                return redirect(url_for("home"))
+                # IBWS: try to advance round before giving up
+                if config.get("ibws_config"):
+                    advanced = _ibws_check_and_advance(user_state)
+                    if advanced:
+                        # New tuples were added — reassign and continue
+                        pass
+                    else:
+                        from potato.ibws_manager import get_ibws_manager
+                        ibws_mgr = get_ibws_manager()
+                        if ibws_mgr and ibws_mgr.is_completed():
+                            logger.debug(f"User {username} completed all IBWS rounds")
+                            get_user_state_manager().advance_phase(username)
+                            return redirect(url_for("home"))
+                else:
+                    logger.debug(f"User {username} completed all assignments at end-of-list")
+                    get_user_state_manager().advance_phase(username)
+                    return redirect(url_for("home"))
         acm = get_ai_cache_manager()
         if acm:
             acm.start_prefetch(user_state.current_instance_index, getattr(acm,"prefetch_page_count_on_next", 0))
@@ -1852,29 +1890,15 @@ def annotate():
 
         logger.debug(f"go_to action with value: {go_to_value}")
         if go_to_value is not None:
+            # Block forward go_to if required annotations aren't met
             target_index = int(go_to_value)
-            current_instance_id = user_state.get_current_instance_id()
-            if (
-                target_index > user_state.current_instance_index
-                and current_instance_id
-                and not _instance_meets_required_annotation_rules(user_state, current_instance_id)
-            ):
-                logger.debug(
-                    "Blocking go_to for user %s from index %s to %s because required annotations are incomplete on instance %s",
-                    username,
-                    user_state.current_instance_index,
-                    target_index,
-                    current_instance_id,
-                )
-                if request.is_json:
-                    return jsonify({
-                        "status": "validation_error",
-                        "message": "Please complete the required annotations before continuing.",
-                    }), 400
-                response = make_response(render_page_with_annotations(username))
-                response.status_code = 400
-                return response
-            go_to_id(username, target_index)
+            if target_index > user_state.current_instance_index:
+                current_id = user_state.get_current_instance_id()
+                block_response = _check_required_or_block(user_state, current_id)
+                if block_response is not None:
+                    return block_response
+
+            go_to_id(username, go_to_value)
             acm = get_ai_cache_manager()
             if acm:
                 acm.start_prefetch(user_state.current_instance_index, 1)
@@ -1883,21 +1907,12 @@ def annotate():
         else:
             logger.warning('go_to action requested but no go_to value provided')
     elif action == "jump_to_unannotated":
-        current_instance_id = user_state.get_current_instance_id()
-        if current_instance_id and not _instance_meets_required_annotation_rules(user_state, current_instance_id):
-            logger.debug(
-                "Blocking jump_to_unannotated for user %s on instance %s because required annotations are incomplete",
-                username,
-                current_instance_id,
-            )
-            if request.is_json:
-                return jsonify({
-                    "status": "validation_error",
-                    "message": "Please complete the required annotations before continuing.",
-                }), 400
-            response = make_response(render_page_with_annotations(username))
-            response.status_code = 400
-            return response
+        # Check required annotations before jumping forward
+        current_id = user_state.get_current_instance_id()
+        block_response = _check_required_or_block(user_state, current_id)
+        if block_response is not None:
+            return block_response
+
         # Find the next unannotated instance and jump to it
         next_idx = user_state.find_next_unannotated_index()
         if next_idx is not None:
@@ -1924,11 +1939,22 @@ def annotate():
 
     # After processing the action, check again if user has completed all assignments
     # This handles the case where the user just finished their last item
-    if _user_has_completed_required_assignments(user_state):
-        logger.debug(f"User {username} has completed all assignments, advancing phase")
-        get_user_state_manager().advance_phase(username)
-        # Use redirect to ensure next phase handler gets a GET request (fixes issue #115)
-        return redirect(url_for("home"))
+    if not user_state.has_remaining_assignments():
+        if config.get("ibws_config"):
+            from potato.ibws_manager import get_ibws_manager
+            ibws_mgr = get_ibws_manager()
+            if ibws_mgr and not ibws_mgr.is_completed():
+                # IBWS still running — don't advance phase, try to get more tuples
+                _ibws_check_and_advance(user_state)
+            else:
+                logger.debug(f"User {username} has completed all IBWS assignments, advancing phase")
+                get_user_state_manager().advance_phase(username)
+                return redirect(url_for("home"))
+        else:
+            logger.debug(f"User {username} has completed all assignments, advancing phase")
+            get_user_state_manager().advance_phase(username)
+            # Use redirect to ensure next phase handler gets a GET request (fixes issue #115)
+            return redirect(url_for("home"))
 
     # Handle GET requests with instance_id query parameter
     if request.method == 'GET' and request.args.get('instance_id'):
@@ -1958,101 +1984,6 @@ def annotate():
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     response.headers['Pragma'] = 'no-cache'
     return response
-
-
-def _instance_meets_required_annotation_rules(user_state, instance_id: str) -> bool:
-    """Return True when all required annotation schemes are satisfied for an instance."""
-    schemes = config.get("annotation_schemes", [])
-
-    for scheme in schemes:
-        if not _scheme_is_required(scheme):
-            continue
-        if not _scheme_has_required_annotation(user_state, instance_id, scheme):
-            return False
-    return True
-
-
-def _user_has_completed_required_assignments(user_state) -> bool:
-    """Return True only when every assignment counting toward completion satisfies required rules."""
-    if user_state.max_assignments < 0:
-        return False
-
-    annotated_ids = user_state.get_annotated_instance_ids()
-    if len(annotated_ids) < user_state.max_assignments:
-        return False
-
-    counted_instance_ids = [
-        instance_id for instance_id in user_state.instance_id_ordering
-        if instance_id
-    ][:user_state.max_assignments]
-
-    if len(counted_instance_ids) < user_state.max_assignments:
-        return False
-
-    return all(
-        instance_id in annotated_ids
-        and _instance_meets_required_annotation_rules(user_state, instance_id)
-        for instance_id in counted_instance_ids
-    )
-
-
-def _scheme_is_required(scheme: dict) -> bool:
-    """Support both legacy `required` and newer `label_requirement` config styles."""
-    label_requirement = scheme.get("label_requirement", {})
-    if isinstance(label_requirement, bool):
-        label_requirement = {"required": label_requirement}
-    return bool(
-        scheme.get("required")
-        or label_requirement.get("required")
-        or label_requirement.get("required_label")
-    )
-
-
-def _value_is_present(value) -> bool:
-    """Treat empty strings and empty collections as missing while allowing 0/False values."""
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return value.strip() != ""
-    if isinstance(value, (list, tuple, dict, set)):
-        return len(value) > 0
-    return True
-
-
-def _scheme_has_required_annotation(user_state, instance_id: str, scheme: dict) -> bool:
-    """Check whether a required scheme is satisfied on a given instance."""
-    scheme_name = scheme.get("name")
-    label_requirement = scheme.get("label_requirement", {})
-    if isinstance(label_requirement, bool):
-        label_requirement = {"required": label_requirement}
-
-    required_labels = label_requirement.get("required_label")
-    if isinstance(required_labels, str):
-        required_labels = {required_labels}
-    elif isinstance(required_labels, list):
-        required_labels = set(required_labels)
-    else:
-        required_labels = set()
-
-    label_values = user_state.instance_id_to_label_to_value.get(instance_id, {})
-    matching_labels = {
-        label.get_name(): value
-        for label, value in label_values.items()
-        if isinstance(label, Label) and label.get_schema() == scheme_name and _value_is_present(value)
-    }
-
-    if required_labels:
-        return any(label_name in required_labels for label_name in matching_labels)
-
-    if scheme.get("annotation_type") == "span":
-        span_values = user_state.instance_id_to_span_to_value.get(instance_id, {})
-        return any(
-            span.get_schema() == scheme_name and _value_is_present(value)
-            for span, value in span_values.items()
-        )
-
-    return bool(matching_labels)
-
 
 @app.route('/get_ai_suggestion', methods=['GET'])
 def get_ai_suggestion():
@@ -3828,6 +3759,11 @@ def get_current_instance():
             logger.error(f"User state not found for user: {username}")
             return jsonify({"error": "User state not found"}), 404
 
+        # Guard: only return instance data during annotation phase
+        if user_state.get_phase() != UserPhase.ANNOTATION:
+            logger.debug(f"User {username} not in annotation phase, no current instance")
+            return jsonify({"error": "Not in annotation phase"}), 404
+
         current_instance = user_state.get_current_instance()
         if not current_instance:
             logger.error(f"No current instance for user: {username}")
@@ -3872,6 +3808,11 @@ def get_instance_data():
         if not user_state:
             logger.error(f"User state not found for user: {username}")
             return jsonify({"error": "User state not found"}), 404
+
+        # Guard: only return instance data during annotation phase
+        if user_state.get_phase() != UserPhase.ANNOTATION:
+            logger.debug(f"User {username} not in annotation phase, no instance data")
+            return jsonify({"error": "Not in annotation phase"}), 404
 
         current_instance = user_state.get_current_instance()
         if not current_instance:
@@ -4094,28 +4035,26 @@ def update_instance():
 
     if request.is_json:
         logger.debug(f"Received JSON data: {request.json}")
-        instance_id = str(request.json.get("instance_id"))  # Normalize to string
+        raw_instance_id = request.json.get("instance_id")
+        if raw_instance_id is None or str(raw_instance_id).strip() == "":
+            logger.warning(f"Received update with null/empty instance_id from user {session.get('username')}")
+            return jsonify({"status": "error", "message": "Missing instance_id"})
+        instance_id = str(raw_instance_id)  # Normalize to string
         username = session['username']
         user_state = get_user_state(username)
         if not user_state:
             logger.error(f"User state not found for user: {username}")
             return jsonify({"status": "error", "message": "User state not found"})
 
-        # Debug: Log user phase for debugging annotation storage issues
-        logger.debug(f"User '{username}' phase: {user_state.get_phase()}, current_phase_and_page: {user_state.current_phase_and_page}")
-
-        # Ignore stale autosaves from survey-flow pages after the user has
-        # already advanced into annotation. These payloads carry an empty or
-        # non-assigned instance_id and should not count as annotated items.
+        # Guard: reject updates for instances not assigned to this user
         if user_state.get_phase() == UserPhase.ANNOTATION:
             assigned_ids = user_state.get_assigned_instance_ids()
-            if not instance_id or instance_id not in assigned_ids:
-                logger.debug(
-                    "Ignoring stale annotation update for user %s with instance_id=%r while in annotation phase",
-                    username,
-                    instance_id,
-                )
-                return jsonify({"status": "ignored", "message": "Stale annotation update ignored"})
+            if assigned_ids and instance_id not in assigned_ids:
+                logger.warning(f"User {username} tried to update unassigned instance {instance_id}")
+                return jsonify({"status": "error", "message": "Instance not assigned to user"})
+
+        # Debug: Log user phase for debugging annotation storage issues
+        logger.debug(f"User '{username}' phase: {user_state.get_phase()}, current_phase_and_page: {user_state.current_phase_and_page}")
 
         # Track session
         if not user_state.session_start_time:
@@ -6801,6 +6740,10 @@ def configure_routes(flask_app, app_config):
     app.add_url_rule("/admin/api/bws_scoring", "admin_api_bws_scoring", admin_api_bws_scoring, methods=["GET"])
     app.add_url_rule("/admin/api/bws_scoring/generate", "admin_api_bws_scoring_generate", admin_api_bws_scoring_generate, methods=["POST"])
 
+    # IBWS admin API routes
+    app.add_url_rule("/admin/api/ibws_status", "admin_api_ibws_status", admin_api_ibws_status, methods=["GET"])
+    app.add_url_rule("/admin/api/ibws_ranking", "admin_api_ibws_ranking", admin_api_ibws_ranking, methods=["GET"])
+
     # MACE admin API routes
     app.add_url_rule("/admin/api/mace/overview", "admin_api_mace_overview", admin_api_mace_overview, methods=["GET"])
     app.add_url_rule("/admin/api/mace/predictions", "admin_api_mace_predictions", admin_api_mace_predictions, methods=["GET"])
@@ -6811,6 +6754,10 @@ def configure_routes(flask_app, app_config):
     app.add_url_rule("/admin/api/embedding_viz/reorder", "admin_api_embedding_viz_reorder", admin_api_embedding_viz_reorder, methods=["POST"])
     app.add_url_rule("/admin/api/embedding_viz/refresh", "admin_api_embedding_viz_refresh", admin_api_embedding_viz_refresh, methods=["POST"])
     app.add_url_rule("/admin/api/embedding_viz/stats", "admin_api_embedding_viz_stats", admin_api_embedding_viz_stats, methods=["GET"])
+
+    # Export admin API routes
+    app.add_url_rule("/admin/api/export/formats", "admin_api_export_formats", admin_api_export_formats, methods=["GET"])
+    app.add_url_rule("/admin/api/export", "admin_api_export", admin_api_export, methods=["POST"])
 
     # Agent chat routes (interactive agent testing)
     app.add_url_rule("/agent_chat/send", "agent_chat_send", agent_chat_send, methods=["POST"])
@@ -7134,6 +7081,51 @@ def admin_api_bws_scoring_generate():
         "total_annotations": len(annotations),
         "method": method,
         "scores": scores_list,
+    })
+
+
+# ============================================================================
+# IBWS Admin API Routes
+# ============================================================================
+
+@app.route('/admin/api/ibws_status', methods=['GET'])
+def admin_api_ibws_status():
+    """Get current IBWS round status and progress."""
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    if not config.get("ibws_config"):
+        return jsonify({"error": "IBWS not configured"}), 400
+
+    from potato.ibws_manager import get_ibws_manager
+    ibws_mgr = get_ibws_manager()
+    if not ibws_mgr:
+        return jsonify({"error": "IBWS manager not initialized"}), 500
+
+    return jsonify(ibws_mgr.get_round_info())
+
+
+@app.route('/admin/api/ibws_ranking', methods=['GET'])
+def admin_api_ibws_ranking():
+    """Get current IBWS ordinal ranking."""
+    from potato.admin import admin_dashboard
+    if not admin_dashboard.check_admin_access():
+        return jsonify({"error": "Admin access required"}), 403
+
+    if not config.get("ibws_config"):
+        return jsonify({"error": "IBWS not configured"}), 400
+
+    from potato.ibws_manager import get_ibws_manager
+    ibws_mgr = get_ibws_manager()
+    if not ibws_mgr:
+        return jsonify({"error": "IBWS manager not initialized"}), 500
+
+    ranking = ibws_mgr.get_final_ranking()
+    return jsonify({
+        "completed": ibws_mgr.is_completed(),
+        "current_round": ibws_mgr.current_round,
+        "ranking": ranking,
     })
 
 
@@ -7539,6 +7531,57 @@ def admin_api_webhooks_test():
     }
     count = emitter.emit("webhook.test", test_payload)
     return jsonify({"status": "sent", "endpoints_matched": count})
+
+
+@app.route('/admin/api/export/formats', methods=['GET'])
+def admin_api_export_formats():
+    """List available export formats with metadata."""
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin access required"}), 403
+
+    from potato.export import export_registry
+    formats = export_registry.list_exporters()
+    return jsonify({"formats": formats})
+
+
+@app.route('/admin/api/export', methods=['POST'])
+def admin_api_export():
+    """Run an export in the requested format and return the result."""
+    api_key = request.headers.get('X-API-Key')
+    if not validate_admin_api_key(api_key):
+        return jsonify({"error": "Admin access required"}), 403
+
+    data = request.get_json(silent=True) or {}
+    fmt = data.get("format")
+    if not fmt:
+        return jsonify({"error": "Missing required field: format"}), 400
+
+    output = data.get("output", "")
+    options = data.get("options") or {}
+
+    config_file = config.get("__config_file__")
+    if not config_file:
+        return jsonify({"error": "Config file path not available"}), 500
+
+    try:
+        from potato.export.cli import build_export_context
+        from potato.export import export_registry
+
+        context = build_export_context(config_file)
+        result = export_registry.export(fmt, context, output, options)
+
+        return jsonify({
+            "success": result.success,
+            "format": result.format_name,
+            "files_written": result.files_written,
+            "stats": result.stats,
+            "warnings": result.warnings,
+            "errors": result.errors,
+        })
+    except Exception as e:
+        logger.exception("Export failed: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/adjudicate/api/submit', methods=['POST'])

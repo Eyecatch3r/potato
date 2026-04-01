@@ -91,7 +91,7 @@ from potato.knowledge_base import init_kb_manager
 from potato.solo_mode import init_solo_mode_manager, get_solo_mode_manager
 from potato.solo_mode.routes import solo_mode_bp
 
-from potato.create_task_cli import create_task_cli, yes_or_no
+from potato.create_task_cli import create_task_cli
 from potato.server_utils.arg_utils import arguments
 from potato.server_utils.config_module import init_config, config
 from potato.server_utils.schemas.span import render_span_annotations
@@ -569,6 +569,36 @@ def load_instance_data(config: dict):
         get_user_state_manager().set_max_annotations_per_user(max_annotations_per_user)
 
         logger.info(f"BWS: Replaced {len(pool_items)} pool items with {len(tuples)} tuples")
+
+    # If IBWS config is present, initialize iterative BWS manager and generate round 1 tuples
+    ibws_config = config.get("ibws_config")
+    if ibws_config:
+        from potato.ibws_manager import init_ibws_manager
+
+        # Collect all loaded pool items
+        pool_items = [item.get_data() for item in ism.items()]
+
+        # Store pool items for scoring
+        config["_bws_pool_items"] = [dict(item) for item in pool_items]
+
+        # Initialize IBWS manager
+        ibws_mgr = init_ibws_manager(config, pool_items, id_key, text_key)
+
+        # Generate round 1 tuples
+        round1_tuples = ibws_mgr.generate_round_tuples()
+
+        # Clear pool items and replace with round 1 tuples
+        ism.clear()
+        for t in round1_tuples:
+            ism.add_item(str(t[id_key]), t)
+
+        # Set unlimited annotations — IBWS manager controls completion
+        get_user_state_manager().set_max_annotations_per_user(-1)
+
+        logger.info(
+            f"IBWS: Initialized with {len(pool_items)} pool items, "
+            f"generated {len(round1_tuples)} round-1 tuples"
+        )
 
     # For each item, render the text to display in the UI ahead of time.
     _render_displayed_text(text_key)
@@ -1235,13 +1265,12 @@ def load_phase_data(config: dict) -> None:
 
                         # Wrap in a minimal page template for consistency
                         cur_program_dir = os.path.dirname(os.path.abspath(__file__))
-                        from server_utils.front_end import get_html, load_header_html, load_project_base_css_html
+                        from server_utils.front_end import get_html
                         html_template_file = os.path.join(cur_program_dir, 'templates', 'base_template_v2.html')
                         header_file = os.path.join(cur_program_dir, 'templates', 'header.html')
                         html_template = get_html(html_template_file, config)
-                        header = load_header_html(config, header_file)
+                        header = get_html(header_file, config)
                         html_template = html_template.replace("{{ HEADER }}", header)
-                        html_template = html_template.replace("{{ PROJECT_BASE_CSS }}", load_project_base_css_html(config))
                         html_template = html_template.replace("{{ TASK_LAYOUT }}", instructions_html)
                         html_template = html_template.replace("{{annotation_codebook}}", "")
                         html_template = html_template.replace("{{annotation_task_name}}",
@@ -1446,6 +1475,13 @@ def get_displayed_text(text):
     """
     import re
 
+    # Handle dict inputs (for tree structures, agent traces, complex data)
+    # Convert to JSON string for display — the actual rendering is handled by
+    # display types (conversation_tree, web_agent_trace, live_agent, etc.)
+    if isinstance(text, dict):
+        import json as _json
+        return _json.dumps(text, ensure_ascii=False, indent=2)
+
     # Handle list inputs (for dialogue or pairwise comparisons with list_as_text config)
     if isinstance(text, list):
         list_config = config.get("list_as_text", {})
@@ -1632,7 +1668,7 @@ def get_current_page_html(config, username):
     context = {
         'username': username,
         'annotation_task_name': config.get('annotation_task_name', ''),
-        'annotation_codebook_url': config.get('annotation_codebook_url', ''),
+        'annotation_codebook_url': _sanitize_codebook_url(config.get('annotation_codebook_url', '')),
         'debug_mode': config.get('debug', False),
         'ui_debug': config.get('ui_debug', False),
         'server_debug': config.get('server_debug', False),
@@ -1646,7 +1682,63 @@ def get_current_page_html(config, username):
         'is_annotation_page': is_annotation_page,
         'annotation_instructions': config.get('annotation_instructions', ''),
     }
-    return render_template(html_fname, **context)
+    rendered_html = render_template(html_fname, **context)
+    soup = BeautifulSoup(rendered_html, "html.parser")
+
+    phase_annotations = user_state.phase_to_page_to_label_to_value.get(phase, {}).get(page, {})
+    for label_obj, value in phase_annotations.items():
+        schema = label_obj.get_schema()
+        label = label_obj.get_name()
+        name = schema + ":::" + label
+
+        input_fields = soup.find_all(["input", "select", "textarea"], {"name": name})
+        if not input_fields:
+            input_fields = soup.find_all(["input"], {"schema": schema, "label_name": label})
+
+        for input_field in input_fields:
+            if input_field is None:
+                continue
+
+            if input_field.get('type') == 'checkbox' or input_field.get('type') == 'radio':
+                if value:
+                    if input_field.get('type') == 'radio':
+                        if input_field.get('value') == value:
+                            input_field['checked'] = True
+                    else:
+                        input_field['checked'] = True
+
+            if input_field.get('type') == 'text':
+                if isinstance(value, str):
+                    input_field['value'] = value
+
+            if input_field.get('type') == 'number':
+                input_field['value'] = str(value)
+
+            if input_field.name == 'textarea':
+                if isinstance(value, str):
+                    input_field.string = value
+
+            if input_field.name == 'select':
+                if isinstance(value, str):
+                    options = input_field.find_all("option", {"value": value})
+                    if options:
+                        options[0]["selected"] = "selected"
+
+    return str(soup)
+
+def _sanitize_codebook_url(url: str) -> str:
+    """Sanitize codebook URL to prevent javascript: and other dangerous protocols."""
+    if not url:
+        return ""
+    stripped = url.strip()
+    # Block dangerous URL schemes
+    lower = stripped.lower().replace('\t', '').replace('\n', '').replace('\r', '')
+    for scheme in ('javascript:', 'vbscript:', 'data:'):
+        if lower.startswith(scheme):
+            logger.warning(f"Blocked dangerous scheme in annotation_codebook_url: {scheme}")
+            return ""
+    return stripped
+
 
 def _is_user_adjudicator(username: str) -> bool:
     """Check if a user is an authorized adjudicator."""
@@ -1719,6 +1811,14 @@ def render_page_with_annotations(username: str):
         "emphasis": list(emphasis_corpus_to_schemas)
     }
 
+    # Include full instance data for dynamic schemas (extractive_qa, text_edit,
+    # error_span, card_sort, conjoint) that need fields beyond text_key
+    if item_data and isinstance(item_data, dict):
+        var_elems["instance_data"] = {
+            k: v for k, v in item_data.items()
+            if isinstance(v, (str, int, float, bool, list))
+        }
+
     # also save the displayed text in the metadata dict
     # instance_id_to_data[instance_id]['displayed_text'] = text
 
@@ -1755,7 +1855,7 @@ def render_page_with_annotations(username: str):
     var_elems["suggestions"] = list(label_suggestion_json)
 
     # Pass BWS items data to frontend JS
-    if config.get("bws_config"):
+    if config.get("bws_config") or config.get("ibws_config"):
         var_elems["bws_items"] = item.get_data().get("_bws_items", [])
     # Fill in the kwargs that the user wanted us to include when rendering the page
     kwargs = {}
@@ -1878,6 +1978,14 @@ def render_page_with_annotations(username: str):
             logger.error(f"Error rendering instance display: {e}")
             has_instance_display = False  # Fall back to legacy mode
 
+    # Get IBWS round info if active
+    ibws_round_info = None
+    if config.get("ibws_config"):
+        from potato.ibws_manager import get_ibws_manager
+        ibws_mgr = get_ibws_manager()
+        if ibws_mgr:
+            ibws_round_info = ibws_mgr.get_round_info()
+
     rendered_html = render_template(
         html_file,
         username=username,
@@ -1923,11 +2031,13 @@ def render_page_with_annotations(username: str):
         annotation_instructions=config.get("annotation_instructions", ""),
         # Adjudication: show link for adjudicators
         is_adjudicator=_is_user_adjudicator(username),
-        annotation_codebook_url=config.get("annotation_codebook_url", ""),
+        annotation_codebook_url=_sanitize_codebook_url(config.get("annotation_codebook_url", "")),
         # Annotation status indicator
         instance_has_annotations=instance_has_annotations,
         # if this is an annotation page
         is_annotation_page=is_annotation_page,
+        # IBWS round info (for round banner)
+        ibws_round_info=ibws_round_info,
         # ai=ai_hints,
         **kwargs
     )
@@ -2031,8 +2141,9 @@ def render_page_with_annotations(username: str):
                         logger.debug(f"No input for {name}")
                         continue
 
-                    # If it's a slider, set the value for the slider
-                    if input_field.get('type') == 'range' and name.endswith(':::slider'):
+                    # If it's a range input (slider, soft_label, vas, range_slider, etc.),
+                    # set the value attribute so loadAnnotations() reads it back
+                    if input_field.get('type') == 'range':
                         input_field['value'] = value
                         continue
 
@@ -2260,7 +2371,7 @@ def render_page_with_annotations_WEIRD(username):
         progress=progress,
         username=username,
         ui_config=ui_config,
-        annotation_codebook_url=config.get("annotation_codebook_url", ""),
+        annotation_codebook_url=_sanitize_codebook_url(config.get("annotation_codebook_url", "")),
     )
 
 def randomize_options(soup, legend_names, seed):
@@ -2706,6 +2817,28 @@ def _register_web_agent_blueprints_if_needed(flask_app, config):
                 pass
         atexit.register(_cleanup_agent_sessions)
 
+    # Check for live_coding_agent display type
+    needs_live_coding_agent = False
+    for field in fields:
+        if isinstance(field, dict) and field.get("type") == "live_coding_agent":
+            needs_live_coding_agent = True
+            break
+
+    if needs_live_coding_agent:
+        from potato.routes_live_coding_agent import live_coding_agent_bp
+        flask_app.register_blueprint(live_coding_agent_bp)
+        flask_app.config["live_coding_agent_enabled"] = True
+        logger.info("Registered live coding agent blueprint (live_coding_agent display type detected)")
+
+        import atexit
+        def _cleanup_coding_agent_sessions():
+            try:
+                from potato.coding_agent_runner_manager import CodingAgentRunnerManager
+                CodingAgentRunnerManager.clear_instance()
+            except Exception:
+                pass
+        atexit.register(_cleanup_coding_agent_sessions)
+
     # Check for trace_ingestion config
     trace_ingestion_config = config.get("trace_ingestion", {})
     if trace_ingestion_config.get("enabled", False):
@@ -2788,22 +2921,52 @@ def create_app(config_file=None):
     def inject_template_context():
         """Inject debug settings and common config values into all templates."""
         from potato.logging_config import is_ui_debug_enabled, is_server_debug_enabled
-        from potato.server_utils.front_end import resolve_header_logo_src
 
         # Build ui_lang dict with defaults, overridden by config
         ui_lang_defaults = {
+            # Navigation & controls
             'next_button': 'Next',
             'previous_button': 'Previous',
+            'submit_button': 'Submit',
+            'go_button': 'Go',
+            'retry_button': 'Retry',
+            'logout': 'Logout',
+            # Status indicators
             'labeled_badge': 'Labeled',
             'not_labeled_badge': 'Not labeled',
-            'submit_button': 'Submit',
             'progress_label': 'Progress',
-            'go_button': 'Go',
-            'logout': 'Logout',
             'loading': 'Loading annotation interface...',
             'error_heading': 'Error',
-            'retry_button': 'Retry',
+            # Annotation interface
             'adjudicate': 'Adjudicate',
+            'codebook': 'Codebook',
+            'instructions_heading': 'Instructions',
+            'text_to_annotate': 'Text to Annotate:',
+            'video_to_annotate': 'Video to Annotate:',
+            'audio_to_annotate': 'Audio to Annotate:',
+            # Login / registration page
+            'login_title': 'Annotation Platform',
+            'login_subtitle_password': 'Sign in to continue',
+            'login_subtitle_username': 'Enter your username to continue',
+            'sign_in_tab': 'Sign In',
+            'register_tab': 'Register',
+            'username_label': 'Username',
+            'password_label': 'Password',
+            'sign_in_button': 'Sign In',
+            'continue_button': 'Continue',
+            'register_button': 'Register',
+            'forgot_password': 'Forgot Password?',
+            'username_placeholder': 'Enter your username',
+            'choose_username_placeholder': 'Choose a username',
+            'create_password_placeholder': 'Create a password',
+            'sign_in_with': 'Sign in with',
+            'or_divider': 'or',
+            # Footer
+            'powered_by': 'Powered by',
+            'cite_us': 'Cite Us',
+            # Language / direction
+            'html_lang': 'en',
+            'html_dir': 'ltr',
         }
         ui_lang_config = config.get('ui_language', {})
         ui_lang = {**ui_lang_defaults, **ui_lang_config}
@@ -2826,7 +2989,7 @@ def create_app(config_file=None):
             'debug_phase': config.get('debug_phase'),
             # Add common config values needed by templates
             'annotation_task_name': config.get('annotation_task_name', 'Annotation Task'),
-            'header_logo_url': resolve_header_logo_src(config),
+            'annotation_codebook_url': _sanitize_codebook_url(config.get('annotation_codebook_url', '')),
             # Multilingual UI strings
             'ui_lang': ui_lang,
             # Project-level base CSS
@@ -3082,15 +3245,6 @@ def run_server(args):
     # Initialize authenticator
     UserAuthenticator.init_from_config(config)
 
-    # Initialize OAuth with Flask app if using OAuth authentication
-    auth_method = config.get("authentication", {}).get("method", "in_memory")
-    if auth_method == "oauth":
-        authenticator = UserAuthenticator.get_instance()
-        oauth_backend = authenticator.get_oauth_backend()
-        if oauth_backend:
-            oauth_backend.init_oauth(app)
-            logger.info("OAuth providers initialized with Flask app")
-
     init_user_state_manager(config)
     init_item_state_manager(config)
 
@@ -3295,6 +3449,16 @@ def run_server(args):
 
     # Create and configure the Flask app
     app = create_app()
+
+    # Initialize OAuth with Flask app if using OAuth authentication
+    # (must happen after create_app() since OAuth needs the Flask app instance)
+    auth_method = config.get("authentication", {}).get("method", "in_memory")
+    if auth_method == "oauth":
+        authenticator = UserAuthenticator.get_instance()
+        oauth_backend = authenticator.get_oauth_backend()
+        if oauth_backend:
+            oauth_backend.init_oauth(app)
+            logger.info("OAuth providers initialized with Flask app")
 
     # Run the Flask app
     host = config.get("host", "0.0.0.0")

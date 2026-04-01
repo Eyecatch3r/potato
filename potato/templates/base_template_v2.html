@@ -1,9 +1,9 @@
 {# Default ui_lang values if not provided by context processor #}
 {% if ui_lang is not defined %}
-{% set ui_lang = {'next_button': 'Next', 'previous_button': 'Previous', 'labeled_badge': 'Labeled', 'not_labeled_badge': 'Not labeled', 'submit_button': 'Submit', 'progress_label': 'Progress', 'go_button': 'Go', 'logout': 'Logout', 'loading': 'Loading annotation interface...', 'error_heading': 'Error', 'retry_button': 'Retry', 'adjudicate': 'Adjudicate'} %}
+{% set ui_lang = {'next_button': 'Next', 'previous_button': 'Previous', 'labeled_badge': 'Labeled', 'not_labeled_badge': 'Not labeled', 'submit_button': 'Submit', 'progress_label': 'Progress', 'go_button': 'Go', 'logout': 'Logout', 'loading': 'Loading annotation interface...', 'error_heading': 'Error', 'retry_button': 'Retry', 'adjudicate': 'Adjudicate', 'codebook': 'Codebook', 'instructions_heading': 'Instructions', 'text_to_annotate': 'Text to Annotate:', 'video_to_annotate': 'Video to Annotate:', 'audio_to_annotate': 'Audio to Annotate:', 'powered_by': 'Powered by', 'cite_us': 'Cite Us', 'html_lang': 'en', 'html_dir': 'ltr'} %}
 {% endif %}
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ ui_lang.html_lang|default('en') }}" dir="{{ ui_lang.html_dir|default('ltr') }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -38,6 +38,12 @@
 
     <!-- Spreadsheet Display Styles -->
     <link rel="stylesheet" href="{{ url_for('static', filename='spreadsheet-display.css') }}">
+
+    <!-- Coding Trace Display Styles -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='coding-trace.css') }}">
+
+    <!-- Live Coding Agent Viewer -->
+    <script src="{{ url_for('static', filename='live-coding-agent-viewer.js') }}" defer></script>
 
     <!-- Format Display Styles (document, code, etc.) -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/format-displays.css') }}">
@@ -82,10 +88,11 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/llm-chat-sidebar.css') }}?v=1">
     {% endif %}
 
-    {{ PROJECT_BASE_CSS }}
-
     <!-- jQuery (required for span annotation) -->
     <script src="https://code.jquery.com/jquery-3.6.0.min.js" integrity="sha256-/xUj+3OJU5yExlq6GSYGSHk7tPXikynS7ogEvDej/m4=" crossorigin="anonymous"></script>
+
+    <!-- Project-level base CSS (injected from base_css config option) -->
+    {{ PROJECT_BASE_CSS | safe }}
 </head>
 
 <body>
@@ -94,11 +101,7 @@
         <div class="navbar-inner">
             <div class="navbar-brand">
                 {% if header_logo_url %}
-                <img
-                    src="{{ header_logo_url }}"
-                    alt="{{ annotation_task_name }} logo"
-                    class="header-logo"
-                >
+                <img class="header-logo" src="{{ header_logo_url }}" alt="Logo">
                 {% endif %}
                 <span class="task-name">{{annotation_task_name}}</span>
             </div>
@@ -116,6 +119,14 @@
                     <span class="progress-label">{{ ui_lang.progress_label }}</span>
                     <span class="fw-medium" id="progress-counter">{{finished}}/{{total_count}}</span>
                 </div>
+
+                {% if ibws_round_info %}
+                <div class="navbar-divider"></div>
+                <div class="ibws-round-banner" id="ibws-round-banner">
+                    <span class="ibws-round-label">Round {{ ibws_round_info.current_round }}{% if ibws_round_info.max_rounds %} of {{ ibws_round_info.max_rounds }}{% endif %}</span>
+                    <span class="ibws-round-detail">{{ ibws_round_info.terminal_items }}/{{ ibws_round_info.total_items }} ranked</span>
+                </div>
+                {% endif %}
 
                 <div class="navbar-divider"></div>
 
@@ -152,7 +163,7 @@
                    target="_blank"
                    rel="noopener noreferrer"
                    title="Open annotation codebook">
-                    <i class="fas fa-book-open"></i> Codebook
+                    <i class="fas fa-book-open"></i> {{ ui_lang.codebook }}
                 </a>
                 {% endif %}
                 <div class="user-pill">
@@ -186,7 +197,7 @@
                 <div id="main-content" style="display: none;">
                     {% if annotation_instructions | default('') %}
                     <details class="annotation-instructions-banner" open>
-                        <summary>Annotation Instructions (click to collapse)</summary>
+                        <summary>{{ ui_lang.instructions_heading|default('Instructions') }}</summary>
                         <div class="annotation-instructions-content">
                             {{ annotation_instructions | safe }}
                         </div>
@@ -202,13 +213,13 @@
                             <div id="text-content" data-original-text="{{instance_plain_text | sanitize_html}}">{{instance | sanitize_html}}</div>
                         </div>
                         {% elif has_video_annotation | default(false) %}
-                        <h5 class="mb-3">Video to Annotate:</h5>
+                        <h5 class="mb-3">{{ ui_lang.video_to_annotate|default('Video to Annotate:') }}</h5>
                         <!-- For video annotation, keep the text-content element accessible for JS but visually hidden -->
                         <div id="instance-text" class="instance-text-container" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0);">
                             <div id="text-content" data-original-text="{{instance_plain_text | sanitize_html}}">{{instance | sanitize_html}}</div>
                         </div>
                         {% elif has_audio_annotation | default(false) %}
-                        <h5 class="mb-3">Audio to Annotate:</h5>
+                        <h5 class="mb-3">{{ ui_lang.audio_to_annotate|default('Audio to Annotate:') }}</h5>
                         <!-- For audio annotation, keep the text-content element accessible for JS but visually hidden -->
                         <div id="instance-text" class="instance-text-container" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0);">
                             <div id="text-content" data-original-text="{{instance_plain_text | sanitize_html}}">{{instance | sanitize_html}}</div>
@@ -221,8 +232,8 @@
                         </div>
                         {% else %}
                         {% if is_annotation_page %}
-                                <h5 class="mb-3">Text to Annotate:</h5>
-                                <div id="instance-text" class="p-3 border rounded instance-text-container" style="background-color: var(--light-bg); min-height: 100px; position: relative;">
+                                <h5 class="instance-text-heading">{{ ui_lang.text_to_annotate|default('Text to Annotate:') }}</h5>
+                                <div id="instance-text" class="p-3 border rounded instance-text-container" style="background-color: var(--light-bg); position: relative;">
                                     <div id="text-content" data-original-text="{{instance_plain_text | sanitize_html}}" style="position: relative; z-index: 1; pointer-events: auto;">{{instance | sanitize_html}}
                                         <div id="span-overlays" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; z-index: 2;">
                                         </div>
@@ -256,21 +267,21 @@
 
         <!-- Navigation buttons -->
         <div class="potato-nav">
-            <button type="button" class="shadcn-button shadcn-button-outline" id="prev-btn" onclick="navigateToPrevious()">
+            <button class="shadcn-button shadcn-button-outline" id="prev-btn" onclick="navigateToPrevious()">
                 <i class="fas fa-arrow-left me-2"></i>{{ ui_lang.previous_button }}
             </button>
-            <button type="button" class="shadcn-button shadcn-button-primary" id="next-btn" onclick="navigateToNext()">
+            <button class="shadcn-button shadcn-button-primary" id="next-btn" onclick="navigateToNext()">
                 {{ ui_lang.next_button }}<i class="fas fa-arrow-right ms-2"></i>
             </button>
         </div>
 
         <!-- Footer -->
         <footer class="potato-footer">
-            Powered by <a href="https://potatoannotator.com/" target="_blank" rel="noopener noreferrer">Potato</a>
+            {{ ui_lang.powered_by|default('Powered by') }} <a href="https://potatoannotator.com/" target="_blank" rel="noopener noreferrer">Potato</a>
             <span class="footer-sep">&middot;</span>
             <a href="https://github.com/davidjurgens/potato" target="_blank" rel="noopener noreferrer">GitHub</a>
             <span class="footer-sep">&middot;</span>
-            <a href="https://github.com/davidjurgens/potato#cite-us" target="_blank" rel="noopener noreferrer">Cite Us</a>
+            <a href="https://github.com/davidjurgens/potato#cite-us" target="_blank" rel="noopener noreferrer">{{ ui_lang.cite_us|default('Cite Us') }}</a>
         </footer>
     </div>
 
@@ -340,7 +351,7 @@
     {% if has_instance_display | default(false) %}
     <script src="{{ url_for('static', filename='instance-display.js') }}?v=2"></script>
     {% endif %}
-    <script src="{{ url_for('static', filename='annotation.js') }}?v=20"></script>
+    <script src="{{ url_for('static', filename='annotation.js') }}?v=21"></script>
 
     <!-- Fabric.js for image annotation (loaded from CDN) -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
@@ -407,8 +418,14 @@
     <!-- Web Agent Trace Viewer (overlays + step navigation) -->
     <script src="{{ url_for('static', filename='web-agent-overlays.js') }}?v=1"></script>
     <script src="{{ url_for('static', filename='web-agent-viewer.js') }}?v=1"></script>
+    <script src="{{ url_for('static', filename='web-agent-playback.js') }}?v=1"></script>
     <!-- Web Agent Interaction Recorder (creation mode) -->
     <script src="{{ url_for('static', filename='web-agent-recorder.js') }}?v=1"></script>
+    <!-- Live Agent Viewer (real-time agent interaction) -->
+    {% if live_agent_enabled | default(false) %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/live-agent.css') }}?v=1">
+    <script src="{{ url_for('static', filename='live-agent-viewer.js') }}?v=1"></script>
+    {% endif %}
 
     <!-- Global keyboard debug (temporary) -->
     <script>
