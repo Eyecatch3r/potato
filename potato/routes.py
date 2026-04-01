@@ -124,6 +124,15 @@ def _inject_quality_control_item_if_needed(username, user_state):
         user_state.instance_id_ordering.insert(insert_index, item_id)
         user_state.assigned_instance_ids.add(item_id)
         user_state.instance_id_to_order = user_state.generate_id_order_mapping(user_state.instance_id_ordering)
+
+        # Keep the current pointer aligned with the injected item.
+        # Users can reach this path with an invalid pointer after exhausting
+        # their queue, so normalize it instead of leaving it at -1 or past EOF.
+        if user_state.current_instance_index < 0:
+            user_state.current_instance_index = 0
+        elif user_state.current_instance_index >= len(user_state.instance_id_ordering):
+            user_state.current_instance_index = len(user_state.instance_id_ordering) - 1
+
         return True
 
     if qc_manager.should_inject_attention_check(username):
@@ -2229,7 +2238,7 @@ def admin_system_state():
                     "phase": str(user_state.get_phase()),
                     "annotations_count": user_annotations,
                     "has_assignments": user_state.has_assignments(),
-                    "remaining_assignments": user_state.has_remaining_assignments()
+                    "remaining_assignments": get_item_state_manager().get_total_assignable_items_for_user(user_state) > 0
                 }
 
         # Get item statistics
@@ -4765,8 +4774,9 @@ def api_frontend():
     if not user_state.has_assignments():
         get_item_state_manager().assign_instances_to_user(user_state)
 
-    # See if this user has finished annotating all of their assigned instances
-    if not user_state.has_remaining_assignments():
+    # See if this user has finished annotating all of their assignable instances
+    remaining_assignable = get_item_state_manager().get_total_assignable_items_for_user(user_state)
+    if remaining_assignable == 0:
         # If the user is done annotating, advance to the next phase
         get_user_state_manager().advance_phase(username)
         return redirect(url_for("home"))
@@ -4812,8 +4822,9 @@ def span_api_frontend():
     if not user_state.has_assignments():
         get_item_state_manager().assign_instances_to_user(user_state)
 
-    # See if this user has finished annotating all of their assigned instances
-    if not user_state.has_remaining_assignments():
+    # See if this user has finished annotating all of their assignable instances
+    remaining_assignable = get_item_state_manager().get_total_assignable_items_for_user(user_state)
+    if remaining_assignable == 0:
         # If the user is done annotating, advance to the next phase
         get_user_state_manager().advance_phase(username)
         return redirect(url_for("home"))

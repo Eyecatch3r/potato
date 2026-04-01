@@ -1764,6 +1764,26 @@ def render_page_with_annotations(username: str):
     is_annotation_page = phase == UserPhase.ANNOTATION
 
     item = user_state.get_current_instance()
+    if item is None:
+        logger.warning(
+            "No current instance available for user %s during annotation; "
+            "attempting to recover",
+            username,
+        )
+
+        # If the pointer is stale but the ordering still contains items, try
+        # to clamp it back into range and re-read the current instance.
+        if getattr(user_state, "instance_id_ordering", None):
+            current_idx = user_state.get_current_instance_index()
+            if current_idx < 0:
+                user_state.current_instance_index = 0
+            elif current_idx >= len(user_state.instance_id_ordering):
+                user_state.current_instance_index = len(user_state.instance_id_ordering) - 1
+            item = user_state.get_current_instance()
+
+    if item is None:
+        return redirect(url_for("home"))
+
     instance_id = item.get_id()
 
     # Extract pre-annotation data if quality control is enabled
