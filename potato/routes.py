@@ -1665,13 +1665,20 @@ def _check_required_or_block(user_state, instance_id: str):
     return None
 
 
-def _has_annotation_work_remaining(user_state) -> bool:
-    """Return True when the user still has assigned or assignable annotation work."""
+def _has_annotation_work_remaining(username, user_state) -> bool:
+    """Return True when the user still has assigned, assignable, or QC work."""
     annotated_ids = user_state.get_annotated_instance_ids()
 
     for instance_id in user_state.instance_id_ordering:
         if instance_id not in annotated_ids:
             return True
+
+    qc_manager = get_quality_control_manager()
+    if qc_manager and (
+        qc_manager.should_inject_attention_check(username)
+        or qc_manager.should_inject_gold_standard(username)
+    ):
+        return True
 
     return get_item_state_manager().get_total_assignable_items_for_user(user_state) > 0
 
@@ -1817,7 +1824,7 @@ def annotate():
     _inject_quality_control_item_if_needed(username, user_state)
 
     # See if this user has finished annotating all of their assigned instances
-    if not _has_annotation_work_remaining(user_state):
+    if not _has_annotation_work_remaining(username, user_state):
         # For IBWS, don't advance phase if more rounds are possible
         if config.get("ibws_config"):
             from potato.ibws_manager import get_ibws_manager
@@ -1877,7 +1884,7 @@ def annotate():
         if block_response is not None:
             return block_response
 
-        if user_state.is_at_end_index() and not _has_annotation_work_remaining(user_state):
+        if user_state.is_at_end_index() and not _has_annotation_work_remaining(username, user_state):
             logger.debug(f"User {username} completed the final available annotation item")
             get_user_state_manager().advance_phase(username)
             return redirect(url_for("home"))
@@ -1885,7 +1892,7 @@ def annotate():
         moved_forward = move_to_next_instance(username)
         if not moved_forward and user_state.is_at_end_index():
             logger.debug(f"User {username} reached the end of assigned instances")
-            if not _has_annotation_work_remaining(user_state):
+            if not _has_annotation_work_remaining(username, user_state):
                 # IBWS: try to advance round before giving up
                 if config.get("ibws_config"):
                     advanced = _ibws_check_and_advance(user_state)
@@ -1966,7 +1973,7 @@ def annotate():
 
     # After processing the action, check again if user has completed all assignments
     # This handles the case where the user just finished their last item
-    if not _has_annotation_work_remaining(user_state):
+    if not _has_annotation_work_remaining(username, user_state):
         if config.get("ibws_config"):
             from potato.ibws_manager import get_ibws_manager
             ibws_mgr = get_ibws_manager()
@@ -4776,9 +4783,11 @@ def api_frontend():
     if not user_state.has_assignments():
         get_item_state_manager().assign_instances_to_user(user_state)
 
+    _inject_quality_control_item_if_needed(username, user_state)
+
     # See if this user has finished annotating all of their assignable instances
-    remaining_assignable = get_item_state_manager().get_total_assignable_items_for_user(user_state)
-    if remaining_assignable == 0:
+    # or has pending QC work to surface next.
+    if not _has_annotation_work_remaining(username, user_state):
         # If the user is done annotating, advance to the next phase
         get_user_state_manager().advance_phase(username)
         return redirect(url_for("home"))
@@ -4824,9 +4833,11 @@ def span_api_frontend():
     if not user_state.has_assignments():
         get_item_state_manager().assign_instances_to_user(user_state)
 
+    _inject_quality_control_item_if_needed(username, user_state)
+
     # See if this user has finished annotating all of their assignable instances
-    remaining_assignable = get_item_state_manager().get_total_assignable_items_for_user(user_state)
-    if remaining_assignable == 0:
+    # or has pending QC work to surface next.
+    if not _has_annotation_work_remaining(username, user_state):
         # If the user is done annotating, advance to the next phase
         get_user_state_manager().advance_phase(username)
         return redirect(url_for("home"))
