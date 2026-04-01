@@ -1812,6 +1812,10 @@ def annotate():
     if config.get("ibws_config"):
         _ibws_check_and_advance(user_state)
 
+    # QC items are injected into the live queue, so make sure they exist
+    # before deciding whether annotation work is actually complete.
+    _inject_quality_control_item_if_needed(username, user_state)
+
     # See if this user has finished annotating all of their assigned instances
     if not _has_annotation_work_remaining(user_state):
         # For IBWS, don't advance phase if more rounds are possible
@@ -1829,8 +1833,6 @@ def annotate():
             logger.debug(f"User {username} has no remaining assignments, advancing phase")
             get_user_state_manager().advance_phase(username)
             return redirect(url_for("home"))
-
-    _inject_quality_control_item_if_needed(username, user_state)
 
     # Handle POST requests
     if request.method == 'POST':
