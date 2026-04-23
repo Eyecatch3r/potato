@@ -137,7 +137,7 @@ def generate_span_layout(annotation_scheme, horizontal=False):
         horizontal = True
 
     schematic = (
-        '<form action="/action_page.php">'
+        '<form action="/action_page.php" onsubmit="return false;">'
         + "  <fieldset>"
         + ("  <legend>%s</legend>" % annotation_scheme["description"])
     )

@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 def generate_multiselect_layout(annotation_scheme):
     schematic = (
-        '<form action="/action_page.php">'
+        '<form action="/action_page.php" onsubmit="return false;">'
         + "  <fieldset>"
         + ("  <legend>%s</legend>" % annotation_scheme["description"])
     )
@@ -148,7 +148,7 @@ def generate_multiselect_layout(annotation_scheme):
         )
 
         schematic += (
-            '<tr><td colspan="%s"><div style="float:left; display:flex; flex-direction:row;">%s <input class="%s" type="text" id="%s" name="%s">'
+            '<tr><td colspan="%s"><div style="float:left; display:flex; flex-direction:row;">%s <input class="%s" type="text" id="%s" name="%s" onkeydown="if(event.key===\'Enter\'){event.preventDefault();return false;}">'
             + '  <label for="%s" %s></label></div></td</tr>'
         ) % (str(n_columns), instruction, class_name, name, name, name, tooltip)
 

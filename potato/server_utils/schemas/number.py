@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 def generate_number_layout(annotation_scheme):
     # '<div style="border:1px solid black; border-radius: 25px;">' + \
     schematic = (
-        '<form action="/action_page.php">'
+        '<form action="/action_page.php" onsubmit="return false;">'
         + "  <fieldset>"
         + ("  <legend>%s</legend>" % annotation_scheme["description"])
     )
@@ -80,7 +80,7 @@ def generate_number_layout(annotation_scheme):
         validation = "required"
 
     schematic += (
-        '  <input class="%s" style=%s type="number" id="%s" name="%s" validation="%s">'
+        '  <input class="%s" style=%s type="number" id="%s" name="%s" validation="%s" onkeydown="if(event.key===\'Enter\'){event.preventDefault();return false;}">'
         + '  <label for="%s" %s></label><br/>'
     ) % (class_name, custom_css, name, name, validation, name, tooltip)
 

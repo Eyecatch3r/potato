@@ -7,7 +7,7 @@ def generate_textbox_layout(annotation_scheme):
 
     #'<div style="border:1px solid black; border-radius: 25px;">' + \
     schematic = (
-        '<form action="/action_page.php">'
+        '<form action="/action_page.php" onsubmit="return false;">'
         + "  <fieldset>"
         + (
             '  <legend>%s</legend> <ul class="likert" style="text-align: center;">'
@@ -85,7 +85,7 @@ def generate_textbox_layout(annotation_scheme):
             )
         else:
             schematic += (
-                '  <li><label for="%s" %s>%s</label> <input class="%s" style=%s type="text" id="%s" name="%s" validation="%s"> </li> <br/>'
+                '  <li><label for="%s" %s>%s</label> <input class="%s" style=%s type="text" id="%s" name="%s" validation="%s" onkeydown="if(event.key===\'Enter\'){event.preventDefault();return false;}"> </li> <br/>'
             ) % (
                 name,
                 tooltip,

@@ -13,7 +13,7 @@ def generate_radio_layout(annotation_scheme, horizontal=False):
         horizontal = True
 
     schematic = (
-        '<form action="/action_page.php">'
+        '<form action="/action_page.php" onsubmit="return false;">'
         + "  <fieldset>"
         + ("  <legend>%s</legend>" % annotation_scheme["description"])
     )
@@ -149,7 +149,7 @@ def generate_radio_layout(annotation_scheme, horizontal=False):
         )
 
         schematic += (
-            '%s <input class="%s" type="text" id="%s" name="%s" >'
+            '%s <input class="%s" type="text" id="%s" name="%s" onkeydown="if(event.key===\'Enter\'){event.preventDefault();return false;}" >'
             + '  <label for="%s" %s></label><br/>'
         ) % (instruction, class_name, name, name, name, tooltip)
 
