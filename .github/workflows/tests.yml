@@ -15,7 +15,7 @@ on:
   pull_request:
     branches: [master, main]
   push:
-    branches: [master, main]
+    branches: [master, main, test/upstream-full-suite]  # TEMP: fork trial run
   schedule:
     - cron: '0 3 * * *'
   workflow_dispatch:
@@ -103,7 +103,7 @@ jobs:
 
   selenium-core:
     name: Selenium core regression tests
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref_name == 'test/upstream-full-suite'  # TEMP
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
