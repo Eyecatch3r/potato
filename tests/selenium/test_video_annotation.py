@@ -277,9 +277,10 @@ site_dir: default
         )
         label_btn.click()
 
-        # Focus on container for keyboard events
-        container = self.driver.find_element(By.CLASS_NAME, "video-annotation-container")
-        container.click()
+        # Send the shortcuts to the page itself. Clicking the container lands
+        # on the native <video controls>, and keys typed while that element
+        # has focus never reach the document-level shortcut handler.
+        self.driver.execute_script("document.activeElement.blur();")
 
         # Set video to start time
         self.driver.execute_script("arguments[0].currentTime = 2.0;", video)

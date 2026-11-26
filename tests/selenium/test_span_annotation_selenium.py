@@ -770,7 +770,10 @@ class TestSpanAnnotationSelenium(BaseSeleniumTest):
                 const node = textContent.childNodes[i];
                 structure.push({
                     index: i,
-                    nodeType: node.nodeType,
+                    // Not `nodeType`: chromedriver reads a returned object
+                    // with nodeType 1 as an element reference and raises
+                    // StaleElementReferenceException.
+                    type: node.nodeType,
                     text: node.textContent,
                     length: node.textContent ? node.textContent.length : 0
                 });
