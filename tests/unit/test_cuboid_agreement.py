@@ -367,4 +367,6 @@ def test_identity_metrics_at_kitti_scale_are_quick():
     elapsed = time.process_time() - started
     assert report["identity"]["n_object_frames"] == 8000
     assert report["identity"]["mota"] == 1.0
-    assert elapsed < 2.5, f"{elapsed:.2f} s"
+    # 2.5 s left no headroom on GitHub's runners (2.52 s CPU seen); the
+    # regression this guards against was well above 4 s.
+    assert elapsed < 3.5, f"{elapsed:.2f} s"
