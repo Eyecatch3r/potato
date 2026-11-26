@@ -99,7 +99,7 @@ jobs:
       - name: Run this shard's files
         run: |
           files=$(find tests/server -name 'test_*.py' | sort | awk -v s=${{ matrix.shard }} 'NR % 4 == s')
-          pytest $files -n 4 --dist loadscope -q
+          pytest $files -n 4 --dist loadfile -q
 
   selenium-core:
     name: Selenium core regression tests
