@@ -456,19 +456,26 @@ site_dir: default
         label_btn = self.driver.find_element(By.CSS_SELECTOR, ".label-btn[data-label='intro']")
         label_btn.click()
 
-        self.driver.execute_script("arguments[0].currentTime = 1.0;", video)
-        self.driver.find_element(By.CSS_SELECTOR, ".segment-btn[data-action='set-start']").click()
-        time.sleep(0.05)
+        # Setting currentTime starts an asynchronous seek; the set-start and
+        # set-end buttons read currentTime, so wait for the seek to land.
+        def seek(seconds):
+            self.driver.execute_script("arguments[0].currentTime = arguments[1];", video, seconds)
+            WebDriverWait(self.driver, 10).until(lambda d: d.execute_script(
+                "return !arguments[0].seeking && Math.abs(arguments[0].currentTime - arguments[1]) < 0.05;",
+                video, seconds))
 
-        self.driver.execute_script("arguments[0].currentTime = 2.5;", video)
+        seek(1.0)
+        self.driver.find_element(By.CSS_SELECTOR, ".segment-btn[data-action='set-start']").click()
+
+        seek(2.5)
         self.driver.find_element(By.CSS_SELECTOR, ".segment-btn[data-action='set-end']").click()
-        time.sleep(0.05)
 
         self.driver.find_element(By.CSS_SELECTOR, ".segment-btn[data-action='create-segment']").click()
-        time.sleep(0.1)
 
         # Check hidden input has data
         hidden_input = self.driver.find_element(By.CSS_SELECTOR, ".annotation-data-input")
+        WebDriverWait(self.driver, 10).until(
+            lambda d: '"segments":[{' in (hidden_input.get_attribute("value") or "").replace(" ", ""))
         input_value = hidden_input.get_attribute("value")
 
         assert input_value and len(input_value) > 0, "Hidden input should have annotation data"
