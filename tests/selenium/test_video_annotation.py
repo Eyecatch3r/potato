@@ -15,6 +15,7 @@ import json
 import os
 import tempfile
 import shutil
+import uuid
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -148,7 +149,9 @@ site_dir: default
             username_input = self.wait.until(
                 EC.presence_of_element_located((By.ID, "login-email"))
             )
-            username_input.send_keys("test_user")
+            # A user per test: the server is shared by the class, and segments
+            # saved by one test would otherwise show up in the next.
+            username_input.send_keys(f"test_user_{uuid.uuid4().hex[:8]}")
 
             # Submit login
             submit_btn = self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
@@ -639,7 +642,9 @@ site_dir: default
             username_input = self.wait.until(
                 EC.presence_of_element_located((By.ID, "login-email"))
             )
-            username_input.send_keys("test_user")
+            # A user per test: the server is shared by the class, and segments
+            # saved by one test would otherwise show up in the next.
+            username_input.send_keys(f"test_user_{uuid.uuid4().hex[:8]}")
             submit_btn = self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
             submit_btn.click()
             time.sleep(0.05)
